@@ -141,11 +141,41 @@ cat > /etc/cni/net.d/10-gate-bridge.conf <<'CNI'
  "ipam":{"type":"host-local","subnet":"10.244.0.0/16","routes":[{"dst":"0.0.0.0/0"}]}}
 CNI
 
-# --kubernetes-version is pinned so kubeadm never queries dl.k8s.io, and every
-# image it needs was baked in by the kubernetes element.
-kubeadm init --kubernetes-version=v${K8S} \\
-             --pod-network-cidr=10.244.0.0/16 \\
-             --skip-phases=addon/kube-proxy || fail kubeadm-init
+# A config file rather than flags, for two reasons.
+#
+# timeouts: the v1beta4 defaults are kubernetesAPICall 1m and
+# controlPlaneComponentHealthCheck 4m. On the 2 vCPU / 4 GB flavor a tenant
+# actually uses, etcd and the API server need longer than a minute to answer,
+# and kubeadm gave up with "Post .../clusterrolebindings: context deadline
+# exceeded" while the static pods were still starting. That is the flavor
+# being small, not the image being broken, so the budget is raised rather than
+# the flavor - the gate should run on what tenants run on.
+#
+# imagePullPolicy: Never makes "the control-plane images really were preloaded"
+# an assertion kubeadm itself enforces, at the earliest possible moment, with
+# no registry reachable to hide a miss.
+cat > /root/kubeadm.yaml <<'KUBEADM'
+apiVersion: kubeadm.k8s.io/v1beta4
+kind: InitConfiguration
+nodeRegistration:
+  criSocket: unix:///var/run/containerd/containerd.sock
+  imagePullPolicy: Never
+timeouts:
+  controlPlaneComponentHealthCheck: 8m0s
+  kubeletHealthCheck: 8m0s
+  kubernetesAPICall: 5m0s
+  etcdAPICall: 4m0s
+  tlsBootstrap: 8m0s
+  discovery: 5m0s
+---
+apiVersion: kubeadm.k8s.io/v1beta4
+kind: ClusterConfiguration
+kubernetesVersion: v${K8S}
+networking:
+  podSubnet: 10.244.0.0/16
+KUBEADM
+
+kubeadm init --config /root/kubeadm.yaml --skip-phases=addon/kube-proxy || fail kubeadm-init
 
 export KUBECONFIG=/etc/kubernetes/admin.conf
 
