@@ -87,11 +87,15 @@ jobs:
       # raw only. Glance can CoW-clone a raw image that sits in the RBD store;
       # a qcow2 forces a full copy on every node boot, which is the whole cost
       # this pipeline exists to avoid.
+      # EXTRA_ELEMENTS is where local additions go. node-tuning is on by
+      # default; add gvisor here to get a runsc runtime handler as well.
       - name: Build
         run: |
           uv run disk-image-create -t raw -o "${NAME}" \
-            vm "${{ matrix.element }}" block-device-kubernetes kubernetes
+            vm "${{ matrix.element }}" block-device-kubernetes kubernetes \
+            ${EXTRA_ELEMENTS}
         env:
+          EXTRA_ELEMENTS: ${{ vars.EXTRA_ELEMENTS || 'node-tuning' }}
           ELEMENTS_PATH: ${{ github.workspace }}/elements
           DIB_RELEASE: ${{ matrix.release }}
           DIB_KUBERNETES_VERSION: ${{ matrix.k8s }}

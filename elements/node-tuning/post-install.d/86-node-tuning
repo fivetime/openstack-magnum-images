@@ -1,0 +1,87 @@
+#!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+#
+# Wire up and then prove the tuning dropped in by static/.
+#
+# Runs in post-install.d so every element has finished: the kernel is
+# installed, so the module tree is there to check against, and containerd's
+# unit exists for its drop-in to apply to.
+#
+# The checks here exist because tuning fails quietly. A module that does not
+# exist only shows up as a systemd-modules-load failure on a node nobody logs
+# into; a sysctl key that does not exist is skipped with a message in a boot
+# log. Both are found here instead, while the build can still fail.
+
+if [ ${DIB_DEBUG_TRACE:-1} -gt 0 ]; then
+    set -x
+fi
+
+set -eu
+set -o pipefail
+
+# --- PAM ---------------------------------------------------------------
+#
+# limits.d is only read when pam_limits is in the stack. Debian family puts it
+# in common-session; the RHEL family uses system-auth and already has it.
+for pam in /etc/pam.d/common-session /etc/pam.d/common-session-noninteractive; do
+    [ -f "$pam" ] || continue
+    grep -q 'pam_limits\.so' "$pam" ||
+        echo 'session required pam_limits.so' >>"$pam"
+done
+
+# --- Module check ------------------------------------------------------
+#
+# Verify every module named in modules-load.d actually exists in the kernel
+# this image ships. nf_conntrack_ipv4 and nf_conntrack_ipv6 were folded into
+# nf_conntrack in Linux 4.19 and are the classic way to get a boot-time
+# failure that nothing surfaces.
+kver=$(basename "$(find /lib/modules -maxdepth 1 -mindepth 1 -type d | sort -V | tail -1)")
+[ -n "$kver" ] || { echo "node-tuning: no kernel module tree found" >&2; exit 1; }
+echo "node-tuning: checking modules against kernel ${kver}"
+
+missing=""
+for conf in /etc/modules-load.d/99-container.conf /etc/modules-load.d/99-ipvs.conf; do
+    [ -f "$conf" ] || continue
+    while read -r mod; do
+        case "$mod" in ''|\#*) continue ;; esac
+        modprobe --dry-run --set-version "$kver" "$mod" >/dev/null 2>&1 ||
+            missing="${missing} ${mod}"
+    done <"$conf"
+done
+if [ -n "$missing" ]; then
+    echo "node-tuning: modules not present in ${kver}:${missing}" >&2
+    exit 1
+fi
+
+# --- sysctl syntax -----------------------------------------------------
+#
+# The values cannot be applied here: this is a chroot with the build host's
+# running kernel and none of the modules loaded, so bridge.* and netfilter.*
+# do not exist yet. What can be checked is that every line is a well-formed
+# "key = value", which catches a typo before it becomes a silently skipped
+# setting on a live node.
+for conf in /etc/sysctl.d/99-production.conf /etc/sysctl.d/99-security.conf; do
+    [ -f "$conf" ] || continue
+    bad=$(grep -vE '^\s*(#|$)' "$conf" | grep -vE '^[a-z][a-z0-9_.*-]*\s*=\s*\S' || true)
+    if [ -n "$bad" ]; then
+        echo "node-tuning: malformed lines in ${conf}:" >&2
+        printf '%s\n' "$bad" >&2
+        exit 1
+    fi
+done
+
+# --- systemd drop-ins --------------------------------------------------
+#
+# A drop-in for a unit that does not exist is inert, and that is exactly the
+# kind of tuning everyone believes is in effect.
+for unit in kubelet containerd; do
+    [ -f "/etc/systemd/system/${unit}.service.d/99-limits.conf" ] || continue
+    systemctl cat "${unit}.service" >/dev/null 2>&1 ||
+        [ -f "/etc/systemd/system/${unit}.service" ] ||
+        [ -f "/usr/lib/systemd/system/${unit}.service" ] || {
+            echo "node-tuning: drop-in for ${unit}.service but no such unit" >&2
+            exit 1
+        }
+done
+
+echo "node-tuning: modules, sysctl syntax and unit drop-ins all check out"
