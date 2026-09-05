@@ -36,6 +36,14 @@ rockylinux/9/rocky-container/9"}
 ARCH_LIST=${ARCH_LIST:-"amd64 arm64"}
 
 # Runner labels per architecture.
+#
+# amd64 builds on a self-hosted runner inside the datacenter by default, so the
+# 3.3 GB image never crosses the internet on its way to Glance. Downloading one
+# built image back from GitHub took 25 minutes at ~0.6 MB/s; over the full
+# matrix that is more time than the builds themselves.
+#
+# arm64 has no self-hosted runner here - there is no arm64 hardware - so it
+# stays on GitHub's arm runner and is published to Releases only.
 RUNNER_AMD64=${RUNNER_AMD64:-ubuntu-24.04}
 RUNNER_ARM64=${RUNNER_ARM64:-ubuntu-24.04-arm}
 
@@ -65,16 +73,31 @@ log() { printf '%s\n' "$*" >&2; }
 declare -A PUBLISHED=()
 load_published() {
     [[ "${FORCE:-false}" == true ]] && { log "FORCE=true: rebuilding everything"; return; }
-    command -v gh >/dev/null || { log "gh not found; treating everything as unpublished"; return; }
-    local name
-    while read -r name; do
-        [[ -n "$name" ]] && PUBLISHED["$name"]=1
-    done < <(gh release list --repo "$REPO" --limit 100 --json tagName --jq '.[].tagName' 2>/dev/null |
-             while read -r tag; do
-                 gh release view "$tag" --repo "$REPO" --json assets \
-                     --jq '.assets[].name' 2>/dev/null
-             done)
-    log "already built: ${#PUBLISHED[@]} assets"
+    local name n=0
+
+    # The local image cache. With Releases optional this is often the only
+    # record, and it is the one that matches what the Glance upload can
+    # actually consume without fetching anything.
+    if [[ -d "${IMAGE_CACHE:-/var/lib/magnum-images}" ]]; then
+        while read -r name; do
+            [[ -n "$name" ]] && { PUBLISHED["$(basename "$name")"]=1; ((n++)) || true; }
+        done < <(find "${IMAGE_CACHE:-/var/lib/magnum-images}" -maxdepth 1 \
+                      -name '*.manifest.json' 2>/dev/null)
+        log "already built (local cache): ${n}"
+    fi
+
+    # Release assets, when there are any. Reachable from any runner, so it is
+    # the record that survives a wiped cache or a different machine.
+    if command -v gh >/dev/null; then
+        while read -r name; do
+            [[ -n "$name" ]] && PUBLISHED["$name"]=1
+        done < <(gh release list --repo "$REPO" --limit 100 --json tagName --jq '.[].tagName' 2>/dev/null |
+                 while read -r tag; do
+                     gh release view "$tag" --repo "$REPO" --json assets \
+                         --jq '.assets[].name' 2>/dev/null
+                 done)
+    fi
+    log "already built (total distinct assets): ${#PUBLISHED[@]}"
 }
 
 maintained_minors() {
@@ -134,7 +157,10 @@ main() {
                     arm64) runner=$RUNNER_ARM64 ;;
                     *) log "SKIP unknown arch ${arch}"; continue ;;
                 esac
-                asset="${name}-${version}-v${k8s}-${arch}.raw.gz"
+                # The manifest, not the image: a release carries the record
+                # of what was built, while the image itself stays in the
+                # datacenter. Both the cache and a release have this name.
+                asset="${name}-${version}-v${k8s}-${arch}.manifest.json"
                 if [[ -n "${PUBLISHED[$asset]:-}" ]]; then
                     log "skip ${asset} (published)"
                     continue

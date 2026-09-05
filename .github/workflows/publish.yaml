@@ -1,22 +1,38 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Build every maintained Kubernetes version, on every supported OS and
-# architecture, prove each image boots a real cluster, and publish it.
+# architecture; publishing anywhere is opt-in.
 #
 # There is no committed version list and no bump pull request: the matrix is
 # discovered at run time from endoflife.date (which minors are maintained) and
-# dl.k8s.io (the newest patch of each), and anything already published is
-# skipped. Following upstream Kubernetes therefore costs no human action.
+# dl.k8s.io (the newest patch of each), and anything already built is skipped.
+# Following upstream Kubernetes therefore costs no human action.
 #
-# ci.yaml is left alone; it stays upstream's pull-request gate so merges from
-# vexxhost/capo-image-elements do not conflict here.
+# WHERE THE BYTES GO
+#
+# A built image is 3.3 GB. Moving one between this datacenter and GitHub was
+# measured at ~0.6 MB/s - 25 minutes for a single image, more than the build
+# itself, and over the full matrix more than everything else combined. So the
+# large files never cross that boundary in either direction:
+#
+#   amd64  built on a self-hosted runner in the datacenter, and read from a
+#          local cache by the Glance upload. Nothing leaves.
+#   arm64  built on GitHub's arm runner and, if Releases are enabled, uploaded
+#          there. It is not pushed to Glance - there is no arm64 compute here -
+#          so nothing comes back.
+#
+# A GitHub Release therefore carries the manifest and a checksum, not the
+# image. The image itself lives in Glance, which is where it gets used.
+#
+# ci.yaml and bump.yaml are left untouched (and disabled in this fork) so
+# merges from vexxhost/capo-image-elements never conflict.
 name: publish
 
 on:
   workflow_dispatch:
     inputs:
       force:
-        description: Rebuild even when the asset is already published
+        description: Rebuild even when this combination was already built
         type: boolean
         default: false
       # The four below narrow a run to one combination. Left empty they keep
@@ -37,8 +53,12 @@ on:
         description: Extra diskimage-builder elements
         type: string
         default: "node-tuning"
+      release:
+        description: Publish the manifest and checksum to a GitHub Release
+        type: boolean
+        default: false
       glance:
-        description: Also upload to Glance and run the acceptance gate
+        description: Upload to Glance and run the acceptance gate
         type: boolean
         default: false
   schedule:
@@ -47,9 +67,17 @@ on:
 
 permissions: {}
 
+env:
+  # Where a finished image waits between jobs. Living outside the workspace is
+  # what lets the Glance upload be re-run on its own after a failure, without
+  # rebuilding and without fetching 3.3 GB back from GitHub.
+  IMAGE_CACHE: ${{ vars.IMAGE_CACHE || '/var/lib/magnum-images' }}
+
 jobs:
   discover:
-    runs-on: ubuntu-latest
+    # On the build runner when there is one: it can see the local image cache,
+    # which is the record of what has been built when Releases are off.
+    runs-on: ${{ vars.BUILD_RUNNER || 'ubuntu-latest' }}
     permissions:
       contents: read
     outputs:
@@ -65,6 +93,7 @@ jobs:
           K8S_LIST: ${{ inputs.k8s }}
           OS_LIST: ${{ inputs.os }}
           ARCH_LIST: ${{ inputs.arch }}
+          RUNNER_AMD64: ${{ vars.BUILD_RUNNER || 'ubuntu-24.04' }}
 
   build:
     needs: discover
@@ -157,27 +186,31 @@ jobs:
           GITHUB_RUN_ID: ${{ github.run_id }}
           GITHUB_SHA: ${{ github.sha }}
 
-      - name: Compress
-        run: sudo apt-get install -y pigz && pigz -9 -f "${NAME}.raw"
+      # Into the cache uncompressed: the only consumer inside the datacenter is
+      # the Glance upload, which needs the raw anyway, and gzipping 3.3 GB to
+      # immediately gunzip it again buys nothing.
+      - name: Cache the image
+        run: |
+          sudo install -d -o "$(id -u)" -g "$(id -g)" -m 755 "$IMAGE_CACHE"
+          sha256sum "${NAME}.raw" | awk '{print $1}' > "${NAME}.raw.sha256"
+          mv -f "${NAME}.raw" "${NAME}.manifest.json" "${NAME}.raw.sha256" "$IMAGE_CACHE/"
+          # Keep the cache from growing without bound. Anything older than
+          # IMAGE_CACHE_DAYS has either been consumed or been superseded.
+          find "$IMAGE_CACHE" -maxdepth 1 -type f \
+               -mtime "+${{ vars.IMAGE_CACHE_DAYS || 7 }}" -delete || true
+          ls -lh "$IMAGE_CACHE" | tail -20
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: ${{ env.NAME }}
-          path: |
-            ${{ env.NAME }}.raw.gz
-            ${{ env.NAME }}.manifest.json
-          if-no-files-found: error
-          retention-days: 7
-
-  # Every successful build gets a downloadable asset, gate or no gate, and
-  # needs no credentials to do it. The release is created as a PRERELEASE;
-  # only the acceptance gate promotes it. That marker is the record of whether
-  # a cluster ever booted on the image - it is not what decides whether to
-  # rebuild, which discover.sh answers from the asset existing at all.
+  # Optional. Carries the manifest and the checksum - the record of what was
+  # built and from what - not the image. Uploading 3.3 GB out of the datacenter
+  # costs more than everything else in this pipeline put together, and the only
+  # consumer of the bytes is Glance, which reads them locally.
   release:
     needs: [discover, build]
-    if: needs.discover.outputs.empty != 'true'
-    runs-on: ubuntu-latest
+    if: >-
+      needs.discover.outputs.empty != 'true' &&
+      (inputs.release == true || vars.RELEASE_ENABLED == 'true')
+    # The same runner as the build: that is where the files are.
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       max-parallel: 1          # one release per version; avoid create races
@@ -187,37 +220,34 @@ jobs:
     env:
       NAME: ${{ matrix.os_name }}-${{ matrix.os_version }}-v${{ matrix.k8s }}-${{ matrix.arch }}
     steps:
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: ${{ env.NAME }}
-      - name: Upload asset
+      - name: Upload manifest and checksum
         run: |
+          cd "$IMAGE_CACHE"
           gh release view "v${{ matrix.k8s }}" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 ||
             gh release create "v${{ matrix.k8s }}" --repo "$GITHUB_REPOSITORY" \
               --prerelease --title "v${{ matrix.k8s }}" \
-              --notes "Node images for Kubernetes v${{ matrix.k8s }}. Prerelease until the acceptance gate has booted a cluster on them."
+              --notes "Node image manifests for Kubernetes v${{ matrix.k8s }}. The images themselves are published to Glance; a release is the record of what was built. Prerelease until the acceptance gate has booted a node on them."
           gh release upload "v${{ matrix.k8s }}" --repo "$GITHUB_REPOSITORY" --clobber \
-            "${NAME}.raw.gz" "${NAME}.manifest.json"
+            "${NAME}.manifest.json" "${NAME}.raw.sha256"
         env:
           GH_TOKEN: ${{ secrets.RELEASE_TOKEN || github.token }}
 
-  # Optional. Cutting a release is what this pipeline owes everyone; pushing
-  # into one particular cloud is a local concern, and it is the only half that
-  # needs credentials and a runner that can reach a private endpoint. So it is
-  # off unless asked for: glance=true on a dispatch, or GLANCE_ENABLED=true as
-  # a repository variable for the nightly run.
+  # Optional, and amd64 only - there is no arm64 compute in this cloud, so an
+  # arm64 image could be uploaded but never booted, and it would have to be
+  # fetched back from GitHub to get here.
   glance:
-    needs: [discover, build, release]
+    needs: [discover, build]
     if: >-
       needs.discover.outputs.empty != 'true' &&
       (inputs.glance == true || vars.GLANCE_ENABLED == 'true')
-    # GitHub-hosted runners cannot reach the private Keystone/Glance endpoints,
-    # so this half runs on a self-hosted runner inside the cluster.
-    runs-on: ${{ vars.GLANCE_RUNNER || 'self-hosted' }}
+    # The build runner, because that is where the cached image is. Re-running
+    # this job alone after a failure therefore costs no rebuild and no
+    # download - which is the whole point of the cache.
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
-      # The gate builds a real cluster per entry. Serialise so the lab is not
-      # asked for eight clusters at once.
+      # The gate boots a VM per entry. Serialise so the cloud is not asked for
+      # the whole matrix at once, and so it does not fight RaaS for compute.
       max-parallel: 1
       matrix: ${{ fromJson(needs.discover.outputs.matrix) }}
     permissions:
@@ -226,15 +256,18 @@ jobs:
       NAME: ${{ matrix.os_name }}-${{ matrix.os_version }}-v${{ matrix.k8s }}-${{ matrix.arch }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: ${{ env.NAME }}
 
-      - run: gunzip -f "${NAME}.raw.gz"
+      - name: Check the cached image is there
+        run: |
+          test -f "$IMAGE_CACHE/${NAME}.raw" ||
+            { echo "no cached image at $IMAGE_CACHE/${NAME}.raw"; exit 1; }
+          sha256sum -c <<<"$(cat "$IMAGE_CACHE/${NAME}.raw.sha256")  $IMAGE_CACHE/${NAME}.raw"
 
       # Uploaded private. Only the gate makes an image public.
       - name: Upload to Glance
-        run: ./hack/glance/push.sh "${NAME}.raw" "${NAME}.manifest.json"
+        run: |
+          ./hack/glance/push.sh \
+            "$IMAGE_CACHE/${NAME}.raw" "$IMAGE_CACHE/${NAME}.manifest.json"
         env:
           OS_AUTH_URL: ${{ secrets.OS_AUTH_URL }}
           OS_PROJECT_NAME: ${{ secrets.OS_PROJECT_NAME }}
@@ -244,20 +277,16 @@ jobs:
           OS_PASSWORD: ${{ secrets.OS_PASSWORD }}
           OS_REGION_NAME: ${{ secrets.OS_REGION_NAME }}
           OS_IDENTITY_API_VERSION: "3"
-          # internal, not public. The public endpoints resolve to companion
-          # Services in the openstack namespace, and magnum has none - so a
-          # runner inside the cluster gets NXDOMAIN for
-          # magnum.openstack.svc.cluster.local. The internal endpoints are
-          # plain <service>-api Services and always resolve.
-          OS_INTERFACE: ${{ vars.OS_INTERFACE || 'internal' }}
+          # The public endpoints resolve throughout this datacenter; the
+          # internal ones are ClusterIP names that only resolve inside the
+          # Kubernetes cluster, and elsewhere land on the gateway VIP where
+          # nothing listens on the service port - a timeout, not an NXDOMAIN.
+          OS_INTERFACE: ${{ vars.OS_INTERFACE || 'public' }}
           IMAGE_STORE: ${{ vars.GLANCE_IMAGE_STORE || 'rbd' }}
           IMAGE_ID_FILE: image-id.txt
 
-      # arm64 has no compute in this cloud, so the gate cannot run for it. It
-      # is skipped explicitly and the image stays private with
-      # boot_verified=false rather than being published as if it were tested.
       - name: Acceptance gate
-        run: ./hack/gate.sh "$(cat image-id.txt)" "${NAME}.manifest.json"
+        run: ./hack/gate.sh "$(cat image-id.txt)" "$IMAGE_CACHE/${NAME}.manifest.json"
         env:
           OS_AUTH_URL: ${{ secrets.OS_AUTH_URL }}
           OS_PROJECT_NAME: ${{ secrets.OS_PROJECT_NAME }}
@@ -267,15 +296,16 @@ jobs:
           OS_PASSWORD: ${{ secrets.OS_PASSWORD }}
           OS_REGION_NAME: ${{ secrets.OS_REGION_NAME }}
           OS_IDENTITY_API_VERSION: "3"
-          OS_INTERFACE: ${{ vars.OS_INTERFACE || 'internal' }}
+          OS_INTERFACE: ${{ vars.OS_INTERFACE || 'public' }}
           SKIP_GATE: ${{ matrix.arch != 'amd64' }}
           GATE_FLAVOR: ${{ vars.GATE_FLAVOR || 'magnum-medium' }}
           GATE_DNS: ${{ vars.GATE_DNS || '192.168.4.254' }}
 
-      # The gate is what turns a prerelease into a release. discover.sh only
-      # counts assets on full releases, so promoting here is what stops the
-      # combination being rebuilt tomorrow.
+      # Only a booted node turns a prerelease into a release, and only when
+      # there is a release to promote.
       - name: Promote the release
+        if: inputs.release == true || vars.RELEASE_ENABLED == 'true'
+        continue-on-error: true
         run: |
           gh release edit "v${{ matrix.k8s }}" --repo "$GITHUB_REPOSITORY" \
             --prerelease=false --latest

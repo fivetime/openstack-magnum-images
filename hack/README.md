@@ -39,29 +39,62 @@ minor。它不报错，就是错。
 | `glance/push.sh` | 按 manifest 打属性传 Glance，`copy-image` 路由进 RBD store 并轮询确认。**传上去是 private** |
 | `gate.sh` | 用该镜像真的开一个 Magnum 集群，等 `CREATE_COMPLETE`、等所有节点 Ready、滚一个 Deployment、核对 kubelet 版本；通过才 `--public` 并发布集群模板；无论成败都拆干净 |
 
-## 两条腿：release 默认，Glance 可选
+## 大文件不过墙
+
+一个成品镜像 3.3 GB。**实测数据中心与 GitHub 之间约 0.6 MB/s —— 单个镜像
+25 分钟**，比构建本身还久；整个矩阵下来比其余所有环节加起来都贵。所以大文件
+在两个方向上都不跨这条边界：
+
+| | 构建在哪 | 大文件去哪 | 穿墙 |
+|---|---|---|---|
+| **amd64** | 自建 runner（数据中心内） | → Glance（本地读缓存） | **零** |
+| **arm64** | GitHub 的 arm runner | → Release（都在 GitHub 侧） | **零** |
+
+arm64 不推 Glance —— 本集群没有 arm64 计算节点，推上去也开不起来，还要把
+3.3 GB 拉回来。
+
+**因此 GitHub Release 里放的是 manifest 和 sha256，不是镜像本体。** 镜像的去处
+是 Glance，那才是它被使用的地方。要一个可下载的归档，用数据中心内的 Ceph RGW，
+本地带宽。
+
+## 三段都可单独重跑
 
 ```
-discover ─→ build ─→ release            ← 默认,GitHub 托管 runner,不需要任何凭据
-                        │
-                        └─→ glance      ← 可选,自建 runner,需要 OS_* secrets
+discover ─→ build ─→ release   （可选,默认关）
+                  └→ glance    （可选,默认关,仅 amd64）
 ```
 
-**发 release 是这条流水线欠所有人的**，所以无条件跑，资产标记为
-**prerelease**。**推 Glance 是某一朵云的私事**，而且是唯一需要凭据和私网可达
-runner 的一段，所以默认不跑，两种方式打开：
+`build` 把成品放进 `IMAGE_CACHE`（默认 `/var/lib/magnum-images`，在工作区之外）：
 
-- 手动触发时勾 `glance=true`
-- 给仓库变量 `GLANCE_ENABLED=true`，让每晚的定时任务也带上这一段
+```
+<name>.raw            3.3 GB,不压缩——唯一的消费者是 Glance 上传,它要的就是 raw
+<name>.manifest.json
+<name>.raw.sha256
+```
 
-`prerelease` 这个标记承载的是**门禁有没有用这个镜像开起来过集群**：
-`gate.sh` 通过后 `gh release edit --prerelease=false` 转正。同一个事实在 Glance
-侧记在 `boot_verified` 属性和镜像可见性上——那才是真正能拦住别人误用的地方。
+**上传失败可以只重跑那个 job**，不重新编译、也不用把 3.3 GB 取回来。这正是把
+构建和上传解耦的目的。缓存超过 `IMAGE_CACHE_DAYS`（默认 7 天）自动清理。
 
-`discover.sh` 判断"要不要重建"时**prerelease 也算数**：它回答的只是"这个组合
-构建过没有"，不是"这个镜像好不好"。否则只要 Glance 那条腿一直关着，整个矩阵
-每晚都会重建一遍。要把一个已构建的组合第一次喂给 Glance 那半段，用
-`force=true`。
+两个开关：
+
+- 手动触发时勾 `release=true` / `glance=true`
+- 仓库变量 `RELEASE_ENABLED=true` / `GLANCE_ENABLED=true` 让定时任务也带上
+
+## "已构建"由谁记录
+
+Release 变成可选之后，就不能只靠它了。`discover.sh` 现在认两处，任一命中即跳过：
+
+1. **本地缓存** `$IMAGE_CACHE/<name>.manifest.json` —— 两个上传都关掉时唯一的记录
+2. **Release 资产** —— 跨机器、跨缓存清空仍然有效
+
+判据是 **manifest 名**而不是 `.raw.gz`（Release 里已经没有镜像本体了）。
+
+它回答的只是"这个组合构建过没有"，不是"这个镜像好不好"，所以 prerelease 也算数。
+要把一个已构建的组合重新喂给上传环节，用 `force=true`。
+
+`prerelease` 标记承载的是**门禁有没有用这个镜像启动过节点**：`gate.sh` 通过后
+`gh release edit --prerelease=false` 转正。同一个事实在 Glance 侧记在
+`boot_verified` 属性和镜像可见性上——那才是真正能拦住别人误用的地方。
 
 ## 三条不肯让步的判据
 
