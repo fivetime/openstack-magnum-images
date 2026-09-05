@@ -1,0 +1,186 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Build every maintained Kubernetes version, on every supported OS and
+# architecture, prove each image boots a real cluster, and publish it.
+#
+# There is no committed version list and no bump pull request: the matrix is
+# discovered at run time from endoflife.date (which minors are maintained) and
+# dl.k8s.io (the newest patch of each), and anything already published is
+# skipped. Following upstream Kubernetes therefore costs no human action.
+#
+# ci.yaml is left alone; it stays upstream's pull-request gate so merges from
+# vexxhost/capo-image-elements do not conflict here.
+name: publish
+
+on:
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Rebuild even when the asset is already published
+        type: boolean
+        default: false
+  schedule:
+    # Nightly. Most runs discover nothing new and cost one API call.
+    - cron: "0 3 * * *"
+
+permissions: {}
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      matrix: ${{ steps.discover.outputs.matrix }}
+      empty: ${{ steps.discover.outputs.empty }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - id: discover
+        run: ./hack/discover.sh
+        env:
+          FORCE: ${{ inputs.force }}
+          GH_TOKEN: ${{ github.token }}
+
+  build:
+    needs: discover
+    if: needs.discover.outputs.empty != 'true'
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      # One broken distro must not hold up the rest; each entry publishes on
+      # its own.
+      matrix: ${{ fromJson(needs.discover.outputs.matrix) }}
+    permissions:
+      contents: read
+    env:
+      NAME: ${{ matrix.os_name }}-${{ matrix.os_version }}-v${{ matrix.k8s }}-${{ matrix.arch }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: step-security/setup-uv@edab89485182ad96613ff847804c272ab5d1e03f # v10.0.0
+        with:
+          enable-cache: true
+      - run: uv sync
+      - run: sudo apt-get install -y $(uv run bindep -b)
+
+      # diskimage-builder untars the base rootfs preserving ownership, which
+      # needs a tar that can set uid/gid.
+      - if: matrix.element == 'ubuntu-minimal'
+        run: sudo chown root /bin/tar && sudo chmod u+s /bin/tar
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /home/runner/.cache/image-create
+          key: ${{ matrix.element }}-${{ matrix.release }}-${{ matrix.arch }}-${{ matrix.k8s }}
+          restore-keys: |
+            ${{ matrix.element }}-${{ matrix.release }}-${{ matrix.arch }}-
+            ${{ matrix.element }}-${{ matrix.release }}-
+
+      # raw only. Glance can CoW-clone a raw image that sits in the RBD store;
+      # a qcow2 forces a full copy on every node boot, which is the whole cost
+      # this pipeline exists to avoid.
+      - name: Build
+        run: |
+          uv run disk-image-create -t raw -o "${NAME}" \
+            vm "${{ matrix.element }}" block-device-kubernetes kubernetes
+        env:
+          ELEMENTS_PATH: ${{ github.workspace }}/elements
+          DIB_RELEASE: ${{ matrix.release }}
+          DIB_KUBERNETES_VERSION: ${{ matrix.k8s }}
+          DIB_MIN_TMPFS: "4"
+          DIB_CLOUD_INIT_GROWPART_DEVICES: '["/"]'
+          DIB_SKIP_BASE_PACKAGE_INSTALL: "1"
+          DIB_IMAGE_SIZE: "3"
+
+      # A build that finished is not a build that is correct. Read the claims
+      # back out of the filesystem before anything downstream trusts them.
+      - name: Verify and write manifest
+        run: |
+          sudo -E ./hack/verify-image.sh "${NAME}.raw" "${NAME}.manifest.json" \
+            "${{ matrix.os_name }}" "${{ matrix.os_version }}" \
+            "${{ matrix.k8s }}" "${{ matrix.arch }}"
+        env:
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          GITHUB_SHA: ${{ github.sha }}
+
+      - name: Compress
+        run: sudo apt-get install -y pigz && pigz -9 -f "${NAME}.raw"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ env.NAME }}
+          path: |
+            ${{ env.NAME }}.raw.gz
+            ${{ env.NAME }}.manifest.json
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: [discover, build]
+    if: needs.discover.outputs.empty != 'true'
+    # GitHub-hosted runners cannot reach the private Keystone/Glance endpoints,
+    # so this half runs on a self-hosted runner inside the cluster.
+    runs-on: ${{ vars.GLANCE_RUNNER || 'self-hosted' }}
+    strategy:
+      fail-fast: false
+      # The gate builds a real cluster per entry. Serialise so the lab is not
+      # asked for eight clusters at once.
+      max-parallel: 1
+      matrix: ${{ fromJson(needs.discover.outputs.matrix) }}
+    permissions:
+      contents: read
+    env:
+      NAME: ${{ matrix.os_name }}-${{ matrix.os_version }}-v${{ matrix.k8s }}-${{ matrix.arch }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ env.NAME }}
+
+      - run: gunzip -f "${NAME}.raw.gz"
+
+      # Uploaded private. Only the gate makes an image public.
+      - name: Upload to Glance
+        run: ./hack/glance/push.sh "${NAME}.raw" "${NAME}.manifest.json"
+        env:
+          OS_AUTH_URL: ${{ secrets.OS_AUTH_URL }}
+          OS_PROJECT_NAME: ${{ secrets.OS_PROJECT_NAME }}
+          OS_PROJECT_DOMAIN_NAME: ${{ secrets.OS_PROJECT_DOMAIN_NAME }}
+          OS_USERNAME: ${{ secrets.OS_USERNAME }}
+          OS_USER_DOMAIN_NAME: ${{ secrets.OS_USER_DOMAIN_NAME }}
+          OS_PASSWORD: ${{ secrets.OS_PASSWORD }}
+          OS_REGION_NAME: ${{ secrets.OS_REGION_NAME }}
+          OS_IDENTITY_API_VERSION: "3"
+          IMAGE_STORE: ${{ vars.GLANCE_IMAGE_STORE || 'rbd' }}
+          IMAGE_ID_FILE: image-id.txt
+
+      # arm64 has no compute in this cloud, so the gate cannot run for it. It
+      # is skipped explicitly and the image stays private with
+      # boot_verified=false rather than being published as if it were tested.
+      - name: Acceptance gate
+        run: ./hack/gate.sh "$(cat image-id.txt)" "${NAME}.manifest.json"
+        env:
+          OS_AUTH_URL: ${{ secrets.OS_AUTH_URL }}
+          OS_PROJECT_NAME: ${{ secrets.OS_PROJECT_NAME }}
+          OS_PROJECT_DOMAIN_NAME: ${{ secrets.OS_PROJECT_DOMAIN_NAME }}
+          OS_USERNAME: ${{ secrets.OS_USERNAME }}
+          OS_USER_DOMAIN_NAME: ${{ secrets.OS_USER_DOMAIN_NAME }}
+          OS_PASSWORD: ${{ secrets.OS_PASSWORD }}
+          OS_REGION_NAME: ${{ secrets.OS_REGION_NAME }}
+          OS_IDENTITY_API_VERSION: "3"
+          SKIP_GATE: ${{ matrix.arch != 'amd64' }}
+          GATE_FLAVOR: ${{ vars.GATE_FLAVOR || 'magnum-medium' }}
+          GATE_DNS: ${{ vars.GATE_DNS || '192.168.4.254' }}
+
+      # The release is the published-set of record that discover.sh reads back
+      # to decide what still needs building, so it is written only after the
+      # gate has had its say.
+      - name: Publish release asset
+        run: |
+          gh release view "v${{ matrix.k8s }}" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 ||
+            gh release create "v${{ matrix.k8s }}" --repo "$GITHUB_REPOSITORY" \
+              --title "v${{ matrix.k8s }}" --notes "Node images for Kubernetes v${{ matrix.k8s }}."
+          gzip -9 -f "${NAME}.raw"
+          gh release upload "v${{ matrix.k8s }}" --repo "$GITHUB_REPOSITORY" --clobber \
+            "${NAME}.raw.gz" "${NAME}.manifest.json"
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN || github.token }}
