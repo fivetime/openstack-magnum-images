@@ -169,11 +169,11 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  # Every successful build gets a downloadable asset, gate or no gate. The
-  # release is created as a PRERELEASE and only the acceptance gate promotes
-  # it, which keeps two things true at once: an image can always be fetched
-  # and inspected, and discover.sh - which counts only full releases - keeps
-  # rebuilding anything that has not passed the gate.
+  # Every successful build gets a downloadable asset, gate or no gate, and
+  # needs no credentials to do it. The release is created as a PRERELEASE;
+  # only the acceptance gate promotes it. That marker is the record of whether
+  # a cluster ever booted on the image - it is not what decides whether to
+  # rebuild, which discover.sh answers from the asset existing at all.
   release:
     needs: [discover, build]
     if: needs.discover.outputs.empty != 'true'
@@ -244,6 +244,12 @@ jobs:
           OS_PASSWORD: ${{ secrets.OS_PASSWORD }}
           OS_REGION_NAME: ${{ secrets.OS_REGION_NAME }}
           OS_IDENTITY_API_VERSION: "3"
+          # internal, not public. The public endpoints resolve to companion
+          # Services in the openstack namespace, and magnum has none - so a
+          # runner inside the cluster gets NXDOMAIN for
+          # magnum.openstack.svc.cluster.local. The internal endpoints are
+          # plain <service>-api Services and always resolve.
+          OS_INTERFACE: ${{ vars.OS_INTERFACE || 'internal' }}
           IMAGE_STORE: ${{ vars.GLANCE_IMAGE_STORE || 'rbd' }}
           IMAGE_ID_FILE: image-id.txt
 
@@ -261,6 +267,7 @@ jobs:
           OS_PASSWORD: ${{ secrets.OS_PASSWORD }}
           OS_REGION_NAME: ${{ secrets.OS_REGION_NAME }}
           OS_IDENTITY_API_VERSION: "3"
+          OS_INTERFACE: ${{ vars.OS_INTERFACE || 'internal' }}
           SKIP_GATE: ${{ matrix.arch != 'amd64' }}
           GATE_FLAVOR: ${{ vars.GATE_FLAVOR || 'magnum-medium' }}
           GATE_DNS: ${{ vars.GATE_DNS || '192.168.4.254' }}
