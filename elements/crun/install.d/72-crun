@@ -47,6 +47,12 @@ crun --version
 # Version 2 schema to match that template. containerd merges imports into one
 # document before interpreting it, so a version 3 section here would name a
 # plugin that does not exist in a version 2 document and be ignored silently.
+# Belt and braces: containerd-conf-d creates this at 71 and dib runs install.d
+# scripts sorted by FILENAME across all elements - element-deps decides which
+# elements are included, not what order their scripts run in. That ordering is
+# an implicit contract a renumbering would break silently, so do not depend on
+# it for something this cheap.
+install -d -o root -g root -m 755 /etc/containerd/conf.d
 cat > /etc/containerd/conf.d/50-crun.toml <<'CRUN'
 # The handler keeps the name "runc": kubeadm, kubelet and every pod without a
 # RuntimeClass look the default up by that name, so renaming it would make the
