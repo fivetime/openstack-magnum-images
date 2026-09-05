@@ -37,10 +37,10 @@ on:
         description: Extra diskimage-builder elements
         type: string
         default: "node-tuning"
-      publish:
-        description: Upload to Glance and run the acceptance gate
+      glance:
+        description: Also upload to Glance and run the acceptance gate
         type: boolean
-        default: true
+        default: false
   schedule:
     # Nightly. Most runs discover nothing new and cost one API call.
     - cron: "0 3 * * *"
@@ -99,6 +99,18 @@ jobs:
           restore-keys: |
             ${{ matrix.element }}-${{ matrix.release }}-${{ matrix.arch }}-
             ${{ matrix.element }}-${{ matrix.release }}-
+
+      # diskimage-builder does much of its work as root, so the cache it
+      # produces contains root-owned entries. actions/cache restores them with
+      # `tar -P`, which preserves that ownership - and then dib's very first
+      # step, mkdir ~/.cache/dib, fails with EACCES for the runner user.
+      #
+      # This only bites on a cache hit, which is why a first, cold run passes
+      # and the next one does not.
+      - name: Make the restored cache writable
+        run: |
+          sudo mkdir -p "$HOME/.cache"
+          sudo chown -R "$(id -un):$(id -gn)" "$HOME/.cache"
 
       # Resolve the runtime stack at build time rather than carrying pinned
       # defaults in the elements. Writes CONTAINERD_VERSION and friends into
@@ -189,11 +201,16 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.RELEASE_TOKEN || github.token }}
 
-  publish:
+  # Optional. Cutting a release is what this pipeline owes everyone; pushing
+  # into one particular cloud is a local concern, and it is the only half that
+  # needs credentials and a runner that can reach a private endpoint. So it is
+  # off unless asked for: glance=true on a dispatch, or GLANCE_ENABLED=true as
+  # a repository variable for the nightly run.
+  glance:
     needs: [discover, build, release]
-    # A dispatch with publish=false stops here: useful for proving a build on
-    # GitHub-hosted runners before any self-hosted runner exists.
-    if: needs.discover.outputs.empty != 'true' && inputs.publish != false
+    if: >-
+      needs.discover.outputs.empty != 'true' &&
+      (inputs.glance == true || vars.GLANCE_ENABLED == 'true')
     # GitHub-hosted runners cannot reach the private Keystone/Glance endpoints,
     # so this half runs on a self-hosted runner inside the cluster.
     runs-on: ${{ vars.GLANCE_RUNNER || 'self-hosted' }}

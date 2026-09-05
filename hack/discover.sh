@@ -45,17 +45,23 @@ DL_K8S=${DL_K8S:-https://dl.k8s.io/release}
 
 log() { printf '%s\n' "$*" >&2; }
 
-# published <asset> — true when a release asset of that name already exists on
-# a FULL release.
+# published <asset> — true when a release asset of that name already exists.
 #
-# The published set is the state of record: it survives a lost cache, a
-# re-run and a fork, and it is reachable from a GitHub-hosted runner (Glance
-# is not). FORCE=true skips the check to allow a deliberate rebuild.
+# This answers one question only: has this exact combination already been
+# built? It is not a judgement about whether the image is any good. So
+# prereleases count too - an image that was built but never gated still does
+# not need building again, and treating it as unbuilt would rebuild the whole
+# matrix every night for as long as the optional Glance half stays off.
 #
-# Prereleases are deliberately not counted. Every build uploads its asset to a
-# prerelease so it can always be downloaded and inspected, and only the
-# acceptance gate promotes that to a full release. Counting prereleases would
-# mean an image that never booted a cluster stops being rebuilt.
+# What the release/prerelease distinction carries instead is whether the
+# acceptance gate booted a cluster on the image. That claim lives on the
+# release, and on the Glance image's boot_verified property and its
+# visibility, which is where it can actually stop somebody using it.
+#
+# The published set is the state of record: it survives a lost cache, a re-run
+# and a fork, and it is reachable from a GitHub-hosted runner (Glance is not).
+# FORCE=true skips the check for a deliberate rebuild - which is also how you
+# feed an already-built combination to the Glance half for the first time.
 declare -A PUBLISHED=()
 load_published() {
     [[ "${FORCE:-false}" == true ]] && { log "FORCE=true: rebuilding everything"; return; }
@@ -63,13 +69,12 @@ load_published() {
     local name
     while read -r name; do
         [[ -n "$name" ]] && PUBLISHED["$name"]=1
-    done < <(gh release list --repo "$REPO" --limit 100 --json tagName,isPrerelease \
-                 --jq '.[] | select(.isPrerelease == false) | .tagName' 2>/dev/null |
+    done < <(gh release list --repo "$REPO" --limit 100 --json tagName --jq '.[].tagName' 2>/dev/null |
              while read -r tag; do
                  gh release view "$tag" --repo "$REPO" --json assets \
                      --jq '.assets[].name' 2>/dev/null
              done)
-    log "already published (gated releases only): ${#PUBLISHED[@]} assets"
+    log "already built: ${#PUBLISHED[@]} assets"
 }
 
 maintained_minors() {

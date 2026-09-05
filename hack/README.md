@@ -39,6 +39,30 @@ minor。它不报错，就是错。
 | `glance/push.sh` | 按 manifest 打属性传 Glance，`copy-image` 路由进 RBD store 并轮询确认。**传上去是 private** |
 | `gate.sh` | 用该镜像真的开一个 Magnum 集群，等 `CREATE_COMPLETE`、等所有节点 Ready、滚一个 Deployment、核对 kubelet 版本；通过才 `--public` 并发布集群模板；无论成败都拆干净 |
 
+## 两条腿：release 默认，Glance 可选
+
+```
+discover ─→ build ─→ release            ← 默认,GitHub 托管 runner,不需要任何凭据
+                        │
+                        └─→ glance      ← 可选,自建 runner,需要 OS_* secrets
+```
+
+**发 release 是这条流水线欠所有人的**，所以无条件跑，资产标记为
+**prerelease**。**推 Glance 是某一朵云的私事**，而且是唯一需要凭据和私网可达
+runner 的一段，所以默认不跑，两种方式打开：
+
+- 手动触发时勾 `glance=true`
+- 给仓库变量 `GLANCE_ENABLED=true`，让每晚的定时任务也带上这一段
+
+`prerelease` 这个标记承载的是**门禁有没有用这个镜像开起来过集群**：
+`gate.sh` 通过后 `gh release edit --prerelease=false` 转正。同一个事实在 Glance
+侧记在 `boot_verified` 属性和镜像可见性上——那才是真正能拦住别人误用的地方。
+
+`discover.sh` 判断"要不要重建"时**prerelease 也算数**：它回答的只是"这个组合
+构建过没有"，不是"这个镜像好不好"。否则只要 Glance 那条腿一直关着，整个矩阵
+每晚都会重建一遍。要把一个已构建的组合第一次喂给 Glance 那半段，用
+`force=true`。
+
 ## 三条不肯让步的判据
 
 **① 构建完成不等于构建正确。** `verify-image.sh` 的每一条断言都是把镜像挂起来
