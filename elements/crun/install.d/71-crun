@@ -1,0 +1,44 @@
+#!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+#
+# Install crun and make it the OCI runtime containerd actually executes.
+#
+# Runs at 71: after 70-containerd has written /etc/containerd/config.toml and
+# after 70-runc, so runc stays on the image as a fallback that can be selected
+# again by editing one line.
+#
+# The runtime handler keeps the name "runc". Kubernetes, kubeadm and every pod
+# without a RuntimeClass ask for that handler by name, so renaming it would
+# make the default runtime unreachable; what changes is which binary the shim
+# executes. crun is a drop-in OCI runtime - CRI-O has shipped it as the default
+# on RHEL and Fedora for years - written in C rather than Go, so it starts
+# faster and holds far less memory per container. On a node running hundreds
+# of them that is the whole point.
+
+if [ ${DIB_DEBUG_TRACE:-1} -gt 0 ]; then
+    set -x
+fi
+
+set -eu
+set -o pipefail
+
+DIB_CRUN_VERSION=${DIB_CRUN_VERSION:-"1.29.1"}
+DIB_CRUN_URL=${DIB_CRUN_URL:-"https://github.com/containers/crun/releases/download/${DIB_CRUN_VERSION}/crun-${DIB_CRUN_VERSION}-linux-${ARCH}"}
+
+TMPDIR=$(mktemp -d)
+trap "rm -rf $TMPDIR" EXIT
+
+cd "${TMPDIR}"
+curl -fsSLO "${DIB_CRUN_URL}"
+install -m 755 "crun-${DIB_CRUN_VERSION}-linux-${ARCH}" /usr/bin/crun
+crun --version
+
+# The section header is indented in containerd's generated config, and
+# BinaryName already exists inside it as ''. So: find the section, then replace
+# the first BinaryName line after it, keeping the file's own indentation.
+python3 /tmp/crun-set-binary.py
+
+# Fail the build rather than ship a config containerd rejects at first boot.
+containerd --config /etc/containerd/config.toml config dump >/dev/null
+containerd --config /etc/containerd/config.toml config dump |
+    grep -B2 -A2 "crun" | head -10

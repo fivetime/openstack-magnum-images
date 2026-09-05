@@ -101,6 +101,28 @@ if [[ -d "$MNT/var/lib/containerd" ]] &&
     images_preloaded=true
 fi
 
+# Optional runtimes. Recorded only when actually present, and - for crun -
+# only when containerd is really configured to execute it: having the binary
+# on the image proves nothing about which runtime a pod gets.
+crun_v=""
+if [[ -x "$MNT/usr/bin/crun" ]] &&
+   grep -q "BinaryName = '/usr/bin/crun'" "$MNT/etc/containerd/config.toml"; then
+    crun_v=$(bin_version /usr/bin/crun --version | awk '{print $2}' || true)
+    log "containerd default runtime is crun ${crun_v}"
+fi
+runsc_v=""
+if [[ -x "$MNT/usr/bin/runsc" ]] &&
+   grep -q "runtimes.gvisor" "$MNT/etc/containerd/config.toml"; then
+    runsc_v=$(bin_version /usr/bin/runsc --version | awk '{print $3}' || true)
+    log "gvisor runtime handler present"
+fi
+kata_v=""
+if [[ -x "$MNT/opt/kata/bin/kata-runtime" ]] &&
+   grep -q "runtimes.kata-" "$MNT/etc/containerd/config.toml"; then
+    kata_v=$(bin_version /opt/kata/bin/kata-runtime --version | awk '{print $NF}' || true)
+    log "kata runtime handlers present"
+fi
+
 jq -n \
     --arg os_name "$OS_NAME" --arg os_version "$OS_VERSION" \
     --arg k8s_version "$K8S" --arg arch "$ARCH" \
@@ -108,6 +130,9 @@ jq -n \
     --arg containerd_version "${containerd_v#v}" \
     --arg runc_version "${runc_v#v}" \
     --arg crictl_version "${crictl_v#v}" \
+    --arg crun_version "${crun_v#v}" \
+    --arg runsc_version "$runsc_v" \
+    --arg kata_version "${kata_v#v}" \
     --arg build_run_id "${GITHUB_RUN_ID:-}" \
     --arg source_commit "${GITHUB_SHA:-}" \
     --argjson images_preloaded "$images_preloaded" \
@@ -115,7 +140,9 @@ jq -n \
     '{os_name:$os_name, os_version:$os_version, k8s_version:$k8s_version,
       arch:$arch, kubelet_version:$kubelet_version,
       containerd_version:$containerd_version, runc_version:$runc_version,
-      crictl_version:$crictl_version, build_run_id:$build_run_id,
+      crictl_version:$crictl_version, crun_version:$crun_version,
+      runsc_version:$runsc_version, kata_version:$kata_version,
+      build_run_id:$build_run_id,
       source_commit:$source_commit, images_preloaded:$images_preloaded,
       boot_verified:$boot_verified}
      | with_entries(select(.value != ""))' >"$OUT"

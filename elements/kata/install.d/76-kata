@@ -1,0 +1,107 @@
+#!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+#
+# Install Kata Containers with its bundled VMMs and register the runtime
+# handlers in containerd.
+#
+# NOT ON BY DEFAULT, for two reasons that are worth knowing before enabling it:
+#
+# Size. kata-static is ~925 MiB compressed and roughly 2.5 GB unpacked - QEMU,
+# cloud-hypervisor, firecracker, guest kernels and initrds. The node image goes
+# from about 3.3 GB to 6-7 GB, DIB_IMAGE_SIZE has to be raised accordingly, and
+# every node CoW-clones the larger image whether or not it ever starts a Kata
+# pod.
+#
+# Nested virtualisation. Every Kata runtime except the ptrace-free ones boots a
+# real VM, so the node needs /dev/kvm. A Magnum node is a guest on a compute
+# node that is itself frequently a guest, which makes a Kata VM a third level
+# of nesting - supported on paper, unusable in practice. Check before enabling:
+#
+#     grep -c vmx /proc/cpuinfo && ls -l /dev/kvm     # inside a node VM
+#
+# If that has no /dev/kvm, use the gvisor element instead: runsc needs no
+# hardware virtualisation at all.
+
+if [ ${DIB_DEBUG_TRACE:-1} -gt 0 ]; then
+    set -x
+fi
+
+set -eu
+set -o pipefail
+
+DIB_KATA_VERSION=${DIB_KATA_VERSION:-"4.1.0"}
+case "${ARCH}" in
+    amd64) KATA_ARCH=amd64 ;;
+    arm64) KATA_ARCH=arm64 ;;
+    *) echo "kata: unsupported architecture ${ARCH}" >&2; exit 1 ;;
+esac
+DIB_KATA_URL=${DIB_KATA_URL:-"https://github.com/kata-containers/kata-containers/releases/download/${DIB_KATA_VERSION}/kata-static-${DIB_KATA_VERSION}-${KATA_ARCH}.tar.zst"}
+
+TMPDIR=$(mktemp -d)
+trap "rm -rf $TMPDIR" EXIT
+
+cd "${TMPDIR}"
+curl -fsSLO "${DIB_KATA_URL}"
+# The release publishes no checksum asset; record what was installed so the
+# manifest can carry it.
+sha256sum "kata-static-${DIB_KATA_VERSION}-${KATA_ARCH}.tar.zst" > /etc/kata-static.sha256
+
+# The tarball is rooted at /opt/kata.
+tar --zstd -xf "kata-static-${DIB_KATA_VERSION}-${KATA_ARCH}.tar.zst" -C /
+
+for b in cloud-hypervisor containerd-shim-kata-v2 firecracker jailer \
+         kata-collect-data.sh kata-monitor kata-runtime "qemu-system-x86_64"; do
+    [ -e "/opt/kata/bin/$b" ] && ln -sfn "/opt/kata/bin/$b" "/usr/local/bin/$b"
+done
+
+# vhost_vsock and vhost_net are how the shim talks to the guest agent. Loaded
+# at boot rather than here: this is a chroot with the build host's kernel.
+printf 'vhost_vsock\nvhost_net\n' > /etc/modules-load.d/kata.conf
+
+install -d -m 755 /etc/kata-containers
+for c in configuration-qemu.toml configuration-clh.toml configuration-fc.toml; do
+    [ -f "/opt/kata/share/defaults/kata-containers/$c" ] &&
+        cp "/opt/kata/share/defaults/kata-containers/$c" "/etc/kata-containers/$c"
+done
+# The Go runtime reads configuration.toml; give it the QEMU one.
+[ -f /etc/kata-containers/configuration-qemu.toml ] &&
+    cp /etc/kata-containers/configuration-qemu.toml /etc/kata-containers/configuration.toml
+for c in configuration-qemu-runtime-rs.toml configuration-clh-runtime-rs.toml \
+         configuration-dragonball.toml; do
+    [ -f "/opt/kata/share/defaults/kata-containers/runtime-rs/$c" ] &&
+        cp "/opt/kata/share/defaults/kata-containers/runtime-rs/$c" "/etc/kata-containers/$c"
+done
+
+# Register the handlers. privileged_without_host_devices is required: a
+# privileged Kata pod must not be handed the host's devices, because the
+# workload runs in a guest and those nodes mean nothing there.
+cat >>/etc/containerd/config.toml <<'CTR'
+
+[plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.kata-qemu]
+  runtime_type = 'io.containerd.kata.v2'
+  privileged_without_host_devices = true
+  pod_annotations = ['io.katacontainers.*']
+  container_annotations = ['io.katacontainers.*']
+  [plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.kata-qemu.options]
+    ConfigPath = '/etc/kata-containers/configuration-qemu.toml'
+
+[plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.kata-clh]
+  runtime_type = 'io.containerd.kata.v2'
+  privileged_without_host_devices = true
+  pod_annotations = ['io.katacontainers.*']
+  container_annotations = ['io.katacontainers.*']
+  [plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.kata-clh.options]
+    ConfigPath = '/etc/kata-containers/configuration-clh.toml'
+
+[plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.kata-dragonball]
+  runtime_type = 'io.containerd.kata.v2'
+  runtime_path = '/opt/kata/runtime-rs/bin/containerd-shim-kata-v2'
+  privileged_without_host_devices = true
+  pod_annotations = ['io.katacontainers.*']
+  container_annotations = ['io.katacontainers.*']
+  [plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.kata-dragonball.options]
+    ConfigPath = '/etc/kata-containers/configuration-dragonball.toml'
+CTR
+
+# Fail the build rather than ship a config containerd rejects at first boot.
+containerd --config /etc/containerd/config.toml config dump >/dev/null

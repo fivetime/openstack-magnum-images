@@ -90,6 +90,7 @@ props=(
 # Provenance and capability flags, straight from the manifest. Absent keys are
 # simply not published rather than guessed.
 for key in containerd_version runc_version cni_plugins_version crictl_version \
+           crun_version runsc_version kata_version \
            build_run_id source_commit boot_verified images_preloaded; do
     value=$(m "$key")
     [[ -n "$value" ]] && props+=(--property "${key}=${value}")
