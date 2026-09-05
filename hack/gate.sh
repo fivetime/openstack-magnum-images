@@ -161,10 +161,16 @@ fail() {
 # would tie this verdict to the cloud's networking instead of to the image.
 # Single node, so no overlay and no NetworkPolicy is needed or tested.
 mkdir -p /etc/cni/net.d
+#
+# isDefaultGateway alone. Adding routes:[{dst:0.0.0.0/0}] to the IPAM as well
+# makes both the plugin and the IPAM result carry a default route, and the
+# second RTM_NEWROUTE fails:
+#   failed to add route '0.0.0.0/0 via 10.244.0.1 dev eth0': file exists
+# Every sandbox on the node then fails to start, coredns included.
 cat > /etc/cni/net.d/10-gate-bridge.conf <<'CNI'
 {"cniVersion":"1.0.0","name":"gate","type":"bridge","bridge":"cni0",
  "isDefaultGateway":true,
- "ipam":{"type":"host-local","subnet":"10.244.0.0/16","routes":[{"dst":"0.0.0.0/0"}]}}
+ "ipam":{"type":"host-local","subnet":"10.244.0.0/16"}}
 CNI
 
 # A config file rather than flags, for two reasons.
