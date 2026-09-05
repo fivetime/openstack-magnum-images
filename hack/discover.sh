@@ -45,11 +45,17 @@ DL_K8S=${DL_K8S:-https://dl.k8s.io/release}
 
 log() { printf '%s\n' "$*" >&2; }
 
-# published <asset> — true when a release asset of that name already exists.
+# published <asset> — true when a release asset of that name already exists on
+# a FULL release.
 #
 # The published set is the state of record: it survives a lost cache, a
 # re-run and a fork, and it is reachable from a GitHub-hosted runner (Glance
 # is not). FORCE=true skips the check to allow a deliberate rebuild.
+#
+# Prereleases are deliberately not counted. Every build uploads its asset to a
+# prerelease so it can always be downloaded and inspected, and only the
+# acceptance gate promotes that to a full release. Counting prereleases would
+# mean an image that never booted a cluster stops being rebuilt.
 declare -A PUBLISHED=()
 load_published() {
     [[ "${FORCE:-false}" == true ]] && { log "FORCE=true: rebuilding everything"; return; }
@@ -57,12 +63,13 @@ load_published() {
     local name
     while read -r name; do
         [[ -n "$name" ]] && PUBLISHED["$name"]=1
-    done < <(gh release list --repo "$REPO" --limit 100 --json tagName --jq '.[].tagName' 2>/dev/null |
+    done < <(gh release list --repo "$REPO" --limit 100 --json tagName,isPrerelease \
+                 --jq '.[] | select(.isPrerelease == false) | .tagName' 2>/dev/null |
              while read -r tag; do
                  gh release view "$tag" --repo "$REPO" --json assets \
                      --jq '.assets[].name' 2>/dev/null
              done)
-    log "already published: ${#PUBLISHED[@]} assets"
+    log "already published (gated releases only): ${#PUBLISHED[@]} assets"
 }
 
 maintained_minors() {
