@@ -1,0 +1,57 @@
+#!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+#
+# Reshape /etc/containerd/config.toml into the form magnum-cluster-api writes,
+# and create the drop-in directory that form imports.
+#
+# WHY THIS EXISTS
+#
+# mcapi does not merge with the node image's containerd config - it replaces
+# it. src/features/containerd_config.rs writes /etc/containerd/config.toml
+# through cloud-init write_files and then restarts containerd, so anything the
+# image put there is gone before the first pod starts. The template it writes
+# (src/resources.rs) is:
+#
+#     version = 2
+#     imports = ["/etc/containerd/conf.d/*.toml"]
+#     [plugins."io.containerd.grpc.v1.cri"]
+#         sandbox_image = "..."
+#     [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc]
+#         runtime_type = "io.containerd.runc.v2"
+#     [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc.options]
+#         SystemdCgroup = true
+#
+# Two consequences.
+#
+# First, anything this image wants containerd to do has to live in
+# /etc/containerd/conf.d/, which that template imports and mcapi therefore
+# preserves. Editing the main config is writing to a file somebody else owns.
+#
+# Second, the drop-ins must use the SAME config version as the main file.
+# containerd merges imports into one document before interpreting it, so a
+# version 3 section (plugins.'io.containerd.cri.v1.runtime') inside a version 2
+# document names a plugin that does not exist there and is silently ignored.
+# containerd 2.x generates version 3 by default, which is why this element
+# rewrites the main config to version 2 rather than leaving the generated one:
+# an image whose own config disagrees with production's would be tested in a
+# shape it never runs in.
+#
+# The sandbox image is carried over from the generated config rather than
+# hardcoded - it has to match the pause image the kubernetes element preloaded,
+# or the first sandbox pulls from a registry that may not be reachable.
+
+if [ ${DIB_DEBUG_TRACE:-1} -gt 0 ]; then
+    set -x
+fi
+
+set -eu
+set -o pipefail
+
+install -d -o root -g root -m 755 /etc/containerd/conf.d
+
+python3 /tmp/containerd-to-mcapi-shape.py
+
+# Fail the build rather than ship a config containerd rejects at first boot.
+containerd --config /etc/containerd/config.toml config dump >/dev/null
+echo "containerd config is now mcapi-shaped:"
+cat /etc/containerd/config.toml

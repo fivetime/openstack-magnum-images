@@ -80,6 +80,16 @@ log "all required binaries present"
 grep -q 'SystemdCgroup = true' "$MNT/etc/containerd/config.toml" ||
     die "containerd config does not set SystemdCgroup = true"
 
+# The drop-ins are only read if the main config imports them, and only
+# interpreted if it declares the same config version. magnum-cluster-api
+# replaces this file at first boot with exactly this shape, so an image that
+# does not match it is tested in a shape it never runs in - which is how crun
+# and gvisor came out configured on the image and absent on a real node.
+grep -q 'imports = \["/etc/containerd/conf.d/\*.toml"\]' "$MNT/etc/containerd/config.toml" ||
+    die "containerd config does not import /etc/containerd/conf.d"
+grep -q '^version = 2$' "$MNT/etc/containerd/config.toml" ||
+    die "containerd config is not version 2; drop-ins written for it would be ignored"
+
 kubelet_v=$(bin_version /usr/bin/kubelet --version | awk '{print $2}' || true)
 if [[ "$native" == true ]]; then
     [[ "$kubelet_v" == "v${K8S}" ]] ||
@@ -106,7 +116,7 @@ fi
 # on the image proves nothing about which runtime a pod gets.
 crun_v=""
 if [[ -x "$MNT/usr/bin/crun" ]] &&
-   grep -q "BinaryName = '/usr/bin/crun'" "$MNT/etc/containerd/config.toml"; then
+   grep -rq 'BinaryName = "/usr/bin/crun"' "$MNT/etc/containerd/conf.d/"; then
     # `crun --version` prints "crun version 1.29.1": the number is field 3.
     # Taking field 2 yielded the word "version", which ${crun_v#v} then turned
     # into "ersion" - published to Glance as the crun version before anyone
@@ -116,13 +126,13 @@ if [[ -x "$MNT/usr/bin/crun" ]] &&
 fi
 runsc_v=""
 if [[ -x "$MNT/usr/bin/runsc" ]] &&
-   grep -q "runtimes.gvisor" "$MNT/etc/containerd/config.toml"; then
+   grep -rq "runtimes.gvisor" "$MNT/etc/containerd/conf.d/"; then
     runsc_v=$(bin_version /usr/bin/runsc --version | awk '{print $3}' || true)
     log "gvisor runtime handler present"
 fi
 kata_v=""
 if [[ -x "$MNT/opt/kata/bin/kata-runtime" ]] &&
-   grep -q "runtimes.kata-" "$MNT/etc/containerd/config.toml"; then
+   grep -rq "runtimes.kata-" "$MNT/etc/containerd/conf.d/"; then
     kata_v=$(bin_version /opt/kata/bin/kata-runtime --version | awk '{print $NF}' || true)
     log "kata runtime handlers present"
 fi

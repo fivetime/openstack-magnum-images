@@ -37,12 +37,30 @@ curl -fsSLO "${DIB_CRUN_URL}"
 install -m 755 "crun-${DIB_CRUN_VERSION}-linux-${ARCH}" /usr/bin/crun
 crun --version
 
-# The section header is indented in containerd's generated config, and
-# BinaryName already exists inside it as ''. So: find the section, then replace
-# the first BinaryName line after it, keeping the file's own indentation.
-python3 /tmp/crun-set-binary.py
+# A drop-in, not an edit to config.toml. magnum-cluster-api replaces that file
+# wholesale at first boot (write_files + restart containerd), so anything
+# written there is gone before the first pod runs - which is exactly what
+# happened: crun was on the image, the handler was not, and only a real Magnum
+# cluster showed it. conf.d survives, because the template mcapi writes imports
+# it.
+#
+# Version 2 schema to match that template. containerd merges imports into one
+# document before interpreting it, so a version 3 section here would name a
+# plugin that does not exist in a version 2 document and be ignored silently.
+cat > /etc/containerd/conf.d/50-crun.toml <<'CRUN'
+# The handler keeps the name "runc": kubeadm, kubelet and every pod without a
+# RuntimeClass look the default up by that name, so renaming it would make the
+# default runtime unreachable. What changes is which binary the shim executes.
+# runc is still on the image; drop this file to go back.
+version = 2
+
+[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc]
+    runtime_type = "io.containerd.runc.v2"
+[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc.options]
+    BinaryName = "/usr/bin/crun"
+    SystemdCgroup = true
+CRUN
 
 # Fail the build rather than ship a config containerd rejects at first boot.
 containerd --config /etc/containerd/config.toml config dump >/dev/null
-containerd --config /etc/containerd/config.toml config dump |
-    grep -B2 -A2 "crun" | head -10
+containerd --config /etc/containerd/config.toml config dump | grep -i "crun" | head -3

@@ -59,7 +59,7 @@ on:
         # a runsc RuntimeClass (~50 MiB). kata is deliberately absent: it is
         # ~2.5 GB unpacked and needs nested virtualisation the nodes do not
         # have. Add it here when both are acceptable.
-        default: "node-tuning crun gvisor"
+        default: "node-tuning containerd-conf-d crun gvisor"
       release:
         description: Publish the manifest and checksum to a GitHub Release
         type: boolean
@@ -209,7 +209,7 @@ jobs:
             vm "${{ matrix.element }}" block-device-kubernetes kubernetes \
             ${EXTRA_ELEMENTS}
         env:
-          EXTRA_ELEMENTS: ${{ inputs.elements || vars.EXTRA_ELEMENTS || 'node-tuning crun gvisor' }}
+          EXTRA_ELEMENTS: ${{ inputs.elements || vars.EXTRA_ELEMENTS || 'node-tuning containerd-conf-d crun gvisor' }}
           ELEMENTS_PATH: ${{ github.workspace }}/elements
           DIB_RELEASE: ${{ matrix.release }}
           DIB_KUBERNETES_VERSION: ${{ matrix.k8s }}
