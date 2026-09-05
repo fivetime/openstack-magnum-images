@@ -48,7 +48,13 @@ IMAGE_IMPORT_TIMEOUT=${IMAGE_IMPORT_TIMEOUT:-900}
 [[ -z "$IMAGE_STORE" || "$IMAGE_STORE" =~ ^[A-Za-z0-9._-]+$ ]] ||
     die "IMAGE_STORE contains unsupported characters"
 
-m() { jq -r --arg k "$1" '.[$k] // ""' "$MANIFEST"; }
+# m <key> — a manifest value, or the empty string when the key is absent.
+#
+# NOT `.[$k] // ""`: jq's alternative operator treats false the same as null,
+# so a boolean false comes back as "" and the caller drops the property. That
+# silently loses exactly the fields worth recording - boot_verified=false on
+# an image no gate has booted would simply not be published at all.
+m() { jq -r --arg k "$1" 'if has($k) then .[$k] else "" end' "$MANIFEST"; }
 
 OS_NAME=$(m os_name);  OS_VERSION=$(m os_version)
 K8S=$(m k8s_version);  ARCH=$(m arch)

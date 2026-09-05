@@ -39,7 +39,7 @@ MANIFEST=$2
 command -v openstack >/dev/null || die "the openstack client is required"
 command -v jq >/dev/null        || die "jq is required"
 
-m() { jq -r --arg k "$1" '.[$k] // ""' "$MANIFEST"; }
+m() { jq -r --arg k "$1" 'if has($k) then .[$k] else "" end' "$MANIFEST"; }
 K8S=$(m k8s_version)
 ARCH=$(m arch)
 [[ -n "$K8S" && -n "$ARCH" ]] || die "manifest is missing k8s_version/arch"
