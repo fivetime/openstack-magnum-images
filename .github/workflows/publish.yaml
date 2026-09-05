@@ -19,6 +19,28 @@ on:
         description: Rebuild even when the asset is already published
         type: boolean
         default: false
+      # The four below narrow a run to one combination. Left empty they keep
+      # the discovered behaviour, so the scheduled run is unaffected.
+      k8s:
+        description: 'Kubernetes versions, space separated (empty: discover)'
+        type: string
+        default: ""
+      os:
+        description: 'OS entries name/version/element/release (empty: all)'
+        type: string
+        default: ""
+      arch:
+        description: Architectures, space separated
+        type: string
+        default: "amd64 arm64"
+      elements:
+        description: Extra diskimage-builder elements
+        type: string
+        default: "node-tuning"
+      publish:
+        description: Upload to Glance and run the acceptance gate
+        type: boolean
+        default: true
   schedule:
     # Nightly. Most runs discover nothing new and cost one API call.
     - cron: "0 3 * * *"
@@ -40,6 +62,9 @@ jobs:
         env:
           FORCE: ${{ inputs.force }}
           GH_TOKEN: ${{ github.token }}
+          K8S_LIST: ${{ inputs.k8s }}
+          OS_LIST: ${{ inputs.os }}
+          ARCH_LIST: ${{ inputs.arch }}
 
   build:
     needs: discover
@@ -84,18 +109,17 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           CONTAINERD_SERIES: ${{ vars.CONTAINERD_SERIES }}
 
-      # raw only. Glance can CoW-clone a raw image that sits in the RBD store;
-      # a qcow2 forces a full copy on every node boot, which is the whole cost
-      # this pipeline exists to avoid.
-      # EXTRA_ELEMENTS is where local additions go. node-tuning is on by
-      # default; add gvisor here to get a runsc runtime handler as well.
+      # raw only: Glance can CoW-clone a raw image that sits in the RBD store,
+      # while a qcow2 forces a full copy on every node boot - the cost this
+      # pipeline exists to avoid. EXTRA_ELEMENTS carries the local additions;
+      # node-tuning is on by default, add gvisor for a runsc runtime handler.
       - name: Build
         run: |
           uv run disk-image-create -t raw -o "${NAME}" \
             vm "${{ matrix.element }}" block-device-kubernetes kubernetes \
             ${EXTRA_ELEMENTS}
         env:
-          EXTRA_ELEMENTS: ${{ vars.EXTRA_ELEMENTS || 'node-tuning' }}
+          EXTRA_ELEMENTS: ${{ inputs.elements || vars.EXTRA_ELEMENTS || 'node-tuning' }}
           ELEMENTS_PATH: ${{ github.workspace }}/elements
           DIB_RELEASE: ${{ matrix.release }}
           DIB_KUBERNETES_VERSION: ${{ matrix.k8s }}
@@ -135,7 +159,9 @@ jobs:
 
   publish:
     needs: [discover, build]
-    if: needs.discover.outputs.empty != 'true'
+    # A dispatch with publish=false stops here: useful for proving a build on
+    # GitHub-hosted runners before any self-hosted runner exists.
+    if: needs.discover.outputs.empty != 'true' && inputs.publish != false
     # GitHub-hosted runners cannot reach the private Keystone/Glance endpoints,
     # so this half runs on a self-hosted runner inside the cluster.
     runs-on: ${{ vars.GLANCE_RUNNER || 'self-hosted' }}

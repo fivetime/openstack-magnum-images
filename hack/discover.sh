@@ -78,23 +78,41 @@ latest_patch() {
     printf '%s\n' "${v#v}"
 }
 
+# resolve_versions echoes one full Kubernetes version per line.
+#
+# K8S_LIST pins the set explicitly, for a one-off build of a specific version.
+# Left unset - the normal case - the set is discovered.
+resolve_versions() {
+    if [[ -n "${K8S_LIST:-}" ]]; then
+        log "K8S_LIST is set; skipping discovery"
+        printf '%s\n' $K8S_LIST
+        return
+    fi
+    local minors=() minor k8s
+    mapfile -t minors < <(maintained_minors)
+    ((${#minors[@]})) || { log "no maintained Kubernetes minors reported"; exit 1; }
+    log "maintained minors: ${minors[*]}"
+    for minor in "${minors[@]}"; do
+        if k8s=$(latest_patch "$minor"); then
+            printf '%s\n' "$k8s"
+        else
+            # A maintained minor with no stable pointer is upstream's problem,
+            # not ours; say so and carry on rather than failing the run.
+            log "SKIP ${minor}: no ${DL_K8S}/stable-${minor}.txt"
+        fi
+    done
+}
+
 main() {
     command -v jq >/dev/null || { log "jq is required"; exit 1; }
     load_published
 
-    local minors=() minor
-    mapfile -t minors < <(maintained_minors)
-    ((${#minors[@]})) || { log "no maintained Kubernetes minors reported"; exit 1; }
-    log "maintained minors: ${minors[*]}"
+    local versions=()
+    mapfile -t versions < <(resolve_versions)
+    ((${#versions[@]})) || { log "no Kubernetes versions to build"; exit 1; }
 
     local include=() os arch k8s name version element release runner asset
-    for minor in "${minors[@]}"; do
-        if ! k8s=$(latest_patch "$minor"); then
-            # A maintained minor with no stable pointer is upstream's problem,
-            # not ours; say so and carry on rather than failing the run.
-            log "SKIP ${minor}: no ${DL_K8S}/stable-${minor}.txt"
-            continue
-        fi
+    for k8s in "${versions[@]}"; do
         while read -r os; do
             [[ -n "$os" ]] || continue
             IFS=/ read -r name version element release <<<"$os"
