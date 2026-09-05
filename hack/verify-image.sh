@@ -107,7 +107,11 @@ fi
 crun_v=""
 if [[ -x "$MNT/usr/bin/crun" ]] &&
    grep -q "BinaryName = '/usr/bin/crun'" "$MNT/etc/containerd/config.toml"; then
-    crun_v=$(bin_version /usr/bin/crun --version | awk '{print $2}' || true)
+    # `crun --version` prints "crun version 1.29.1": the number is field 3.
+    # Taking field 2 yielded the word "version", which ${crun_v#v} then turned
+    # into "ersion" - published to Glance as the crun version before anyone
+    # noticed. Reading a value back is only worth anything if the parse is right.
+    crun_v=$(bin_version /usr/bin/crun --version | awk '{print $3}' || true)
     log "containerd default runtime is crun ${crun_v}"
 fi
 runsc_v=""
