@@ -219,6 +219,9 @@ jobs:
           DIB_RUNC_VERSION: ${{ env.RUNC_VERSION }}
           DIB_CNI_PLUGINS_VERSION: ${{ env.CNI_PLUGINS_VERSION }}
           DIB_CRI_TOOLS_VERSION: ${{ env.CRI_TOOLS_VERSION }}
+          # Only read when the crun / kata elements are in the build.
+          DIB_CRUN_VERSION: ${{ env.CRUN_VERSION }}
+          DIB_KATA_VERSION: ${{ env.KATA_VERSION }}
           DIB_MIN_TMPFS: "4"
           DIB_CLOUD_INIT_GROWPART_DEVICES: '["/"]'
           DIB_SKIP_BASE_PACKAGE_INSTALL: "1"

@@ -1,8 +1,20 @@
 # kata
 
 装 Kata Containers 及其自带的 VMM（QEMU / cloud-hypervisor / firecracker /
-Dragonball），并在 containerd 里注册 `kata-qemu`、`kata-clh`、`kata-dragonball`
-三个 runtime handler。
+Dragonball），并在 containerd 里注册五个 runtime handler：
+
+```
+kata-qemu              Go 运行时 + QEMU
+kata-clh               Go 运行时 + cloud-hypervisor
+kata-qemu-runtime-rs   Rust 运行时 + QEMU
+kata-clh-runtime-rs    Rust 运行时 + cloud-hypervisor
+kata-dragonball        Rust 运行时,Dragonball 内置于 shim
+```
+
+**`kata-fc`（firecracker）没有注册** —— 它要 `devmapper` snapshotter，而
+devmapper 需要真实块设备上的 LVM thin pool，镜像做不到（依赖节点的磁盘）。
+硬注册只会得到一个"收下 Pod 然后失败"的 handler。`configuration-fc.toml`
+已经装进镜像，节点自己配好 devmapper 后用 drop-in 补上即可。
 
 **默认不启用。** 启用前先读完下面两条。
 
@@ -12,10 +24,13 @@ Dragonball），并在 containerd 里注册 `kata-qemu`、`kata-clh`、`kata-dra
 |---|---|---|
 | 仓库变量 | `EXTRA_ELEMENTS` | `node-tuning crun gvisor kata` |
 | 仓库变量 | **`DIB_IMAGE_SIZE`** | **`8`**（默认 3，不改必然构建失败） |
-| 可选 | `DIB_KATA_VERSION` | 默认 `4.1.0` |
+| 可选 | `DIB_KATA_VERSION` | **不用设** —— `hack/versions.sh` 每次构建解析最新版 |
 
 手动触发时也可以用 `elements` 这个输入代替 `EXTRA_ELEMENTS`，但
 `DIB_IMAGE_SIZE` **只有仓库变量**这一个入口。
+
+版本不用管：`hack/versions.sh` 每次构建从 GitHub 解析 kata 的最新发行版，
+元素里那个数字只是给手工跑 `disk-image-create` 的人兜底。
 
 ## ① 体积
 

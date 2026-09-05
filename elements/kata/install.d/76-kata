@@ -29,6 +29,10 @@ fi
 set -eu
 set -o pipefail
 
+# hack/versions.sh resolves this per build, so the number here is only a
+# floor for someone running disk-image-create by hand. Do not treat it as
+# the version that ships: the pipeline always overrides it with the newest
+# kata-containers release.
 DIB_KATA_VERSION=${DIB_KATA_VERSION:-"4.1.0"}
 case "${ARCH}" in
     amd64) KATA_ARCH=amd64 ;;
@@ -101,7 +105,41 @@ cat >>/etc/containerd/config.toml <<'CTR'
   container_annotations = ['io.katacontainers.*']
   [plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.kata-dragonball.options]
     ConfigPath = '/etc/kata-containers/configuration-dragonball.toml'
+
+[plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.kata-qemu-runtime-rs]
+  runtime_type = 'io.containerd.kata.v2'
+  runtime_path = '/opt/kata/runtime-rs/bin/containerd-shim-kata-v2'
+  privileged_without_host_devices = true
+  pod_annotations = ['io.katacontainers.*']
+  container_annotations = ['io.katacontainers.*']
+  [plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.kata-qemu-runtime-rs.options]
+    ConfigPath = '/etc/kata-containers/configuration-qemu-runtime-rs.toml'
+
+[plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.kata-clh-runtime-rs]
+  runtime_type = 'io.containerd.kata.v2'
+  runtime_path = '/opt/kata/runtime-rs/bin/containerd-shim-kata-v2'
+  privileged_without_host_devices = true
+  pod_annotations = ['io.katacontainers.*']
+  container_annotations = ['io.katacontainers.*']
+  [plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.kata-clh-runtime-rs.options]
+    ConfigPath = '/etc/kata-containers/configuration-clh-runtime-rs.toml'
 CTR
+
+# kata-fc is deliberately not registered. Firecracker requires the devmapper
+# snapshotter, which needs an LVM thin pool on a real block device - something
+# an image cannot create, because it depends on the node's disks. Registering
+# it anyway would publish a handler that accepts pods and then fails them.
+# configuration-fc.toml is installed, so a node that does set up devmapper can
+# add the handler with a drop-in.
+
+# Every registered handler must have the config file it points at, or the
+# failure surfaces as a pod that will not start rather than a build that did.
+for c in configuration-qemu.toml configuration-clh.toml \
+         configuration-dragonball.toml configuration-qemu-runtime-rs.toml \
+         configuration-clh-runtime-rs.toml; do
+    [ -f "/etc/kata-containers/$c" ] ||
+        { echo "kata: registered a handler but /etc/kata-containers/$c is missing" >&2; exit 1; }
+done
 
 # Fail the build rather than ship a config containerd rejects at first boot.
 containerd --config /etc/containerd/config.toml config dump >/dev/null

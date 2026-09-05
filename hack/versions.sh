@@ -87,6 +87,15 @@ CONTAINERD=$(newest containerd/containerd "${CONTAINERD_SERIES:-}")
 RUNC=$(newest opencontainers/runc)
 CNI=$(newest containernetworking/plugins)
 
+# Optional runtimes. Resolved here for the same reason as the rest: a version
+# pinned in an element goes stale silently. Both are only consumed when the
+# corresponding element is in the build, so resolving them always costs two
+# API calls and keeps the elements free of numbers.
+#
+# Kata tags carry no leading v, which newest() already normalises away.
+CRUN=$(newest containers/crun)
+KATA=$(newest kata-containers/kata-containers)
+
 # cri-tools ships one series per Kubernetes minor. When a brand new Kubernetes
 # minor lands before its cri-tools counterpart, fall back to the newest
 # available rather than failing the build, and say which happened.
@@ -98,6 +107,7 @@ else
 fi
 
 log "kubernetes=${K8S} containerd=${CONTAINERD} runc=${RUNC} cni=${CNI} crictl=${CRICTL}"
+log "crun=${CRUN} kata=${KATA} (used only when those elements are built)"
 
 emit() {
     if [[ -n "${GITHUB_ENV:-}" ]]; then printf '%s\n' "$1" >>"$GITHUB_ENV"; fi
@@ -107,3 +117,5 @@ emit "CONTAINERD_VERSION=${CONTAINERD}"
 emit "RUNC_VERSION=${RUNC}"
 emit "CNI_PLUGINS_VERSION=${CNI}"
 emit "CRI_TOOLS_VERSION=${CRICTL}"
+emit "CRUN_VERSION=${CRUN}"
+emit "KATA_VERSION=${KATA}"

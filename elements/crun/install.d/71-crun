@@ -22,6 +22,10 @@ fi
 set -eu
 set -o pipefail
 
+# hack/versions.sh resolves this per build, so the number here is only a
+# floor for someone running disk-image-create by hand. Do not treat it as
+# the version that ships: the pipeline always overrides it with the newest
+# containers/crun release.
 DIB_CRUN_VERSION=${DIB_CRUN_VERSION:-"1.29.1"}
 DIB_CRUN_URL=${DIB_CRUN_URL:-"https://github.com/containers/crun/releases/download/${DIB_CRUN_VERSION}/crun-${DIB_CRUN_VERSION}-linux-${ARCH}"}
 
