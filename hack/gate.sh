@@ -197,9 +197,24 @@ for i in \$(seq 1 60); do
 done
 kubectl get nodes -o wide
 
+# The default ServiceAccount is created asynchronously by the service-account
+# controller, and a pod referencing it is rejected until it exists. Creating
+# the pod two seconds after the node went Ready lost that race:
+#   pods "gate" is forbidden: error looking up service account default/default
+# That is the control plane still settling, not a defect in the image.
+for i in \$(seq 1 60); do
+    kubectl -n default get serviceaccount default >/dev/null 2>&1 && break
+    sleep 5
+done
+
 # --image-pull-policy=Never turns "the control-plane images really were
 # preloaded" into a hard assertion instead of a directory listing.
-kubectl run gate --image=registry.k8s.io/pause:3.10.2 --image-pull-policy=Never || fail pod-create
+# Retried: admission and the scheduler can both still be warming up.
+for i in \$(seq 1 12); do
+    kubectl run gate --image=registry.k8s.io/pause:3.10.2 --image-pull-policy=Never && break
+    [ "\$i" = 12 ] && fail pod-create
+    sleep 5
+done
 kubectl wait --for=condition=Ready pod/gate --timeout=180s || fail pod-ready
 
 KUBELET=\$(kubelet --version | awk '{print \$2}')
