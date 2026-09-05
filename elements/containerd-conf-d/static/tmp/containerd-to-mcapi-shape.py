@@ -27,6 +27,20 @@ if not match:
     raise SystemExit("containerd-conf-d: no sandbox image found in the config")
 sandbox = match.group(1)
 
+# Carry over disabled_plugins. The containerd element sets it for a reason its
+# own comment states: "These plugins also prevent containerd from running
+# without proper configuration." Dropping it made the btrfs snapshotter fail to
+# find its mount info, which cascaded into the CRI plugin never loading, which
+# made `kubeadm config images pull` fail with "unknown service
+# runtime.v1.RuntimeService". `containerd config dump` did not catch it - the
+# config was valid, the runtime behaviour was not.
+#
+# mcapi's own template has no disabled_plugins and real nodes work anyway, so
+# this matters to the build chroot rather than to production. Keeping it costs
+# nothing and the build needs it.
+disabled = re.search(r"^\s*disabled_plugins\s*=\s*(\[[^]]*\])", text, re.M)
+disabled_line = f"disabled_plugins = {disabled.group(1)}\n" if disabled else ""
+
 CONFIG.write_text(
     f"""# Written by the containerd-conf-d element to match what
 # magnum-cluster-api writes to this path at first boot, so the image is tested
@@ -34,6 +48,7 @@ CONFIG.write_text(
 # /etc/containerd/conf.d/, which survives that replacement.
 version = 2
 
+{disabled_line}
 imports = ["/etc/containerd/conf.d/*.toml"]
 
 [plugins]
@@ -45,4 +60,4 @@ imports = ["/etc/containerd/conf.d/*.toml"]
     SystemdCgroup = true
 """
 )
-print(f"containerd-conf-d: config.toml reshaped, sandbox_image = {sandbox}")
+print(f"containerd-conf-d: reshaped; sandbox={sandbox}; {disabled_line.strip() or 'no disabled_plugins carried over'}")

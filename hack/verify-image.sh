@@ -90,6 +90,14 @@ grep -q 'imports = \["/etc/containerd/conf.d/\*.toml"\]' "$MNT/etc/containerd/co
 grep -q '^version = 2$' "$MNT/etc/containerd/config.toml" ||
     die "containerd config is not version 2; drop-ins written for it would be ignored"
 
+# The containerd element disables the unused snapshotters because, in its own
+# words, they "prevent containerd from running without proper configuration".
+# Losing that line let the btrfs snapshotter fail to find its mount info, which
+# cascaded into the CRI plugin never loading - and `containerd config dump`
+# passed, because the config was valid and only the runtime behaviour was not.
+grep -q '^disabled_plugins' "$MNT/etc/containerd/config.toml" ||
+    die "containerd config lost disabled_plugins; the CRI plugin will not load"
+
 kubelet_v=$(bin_version /usr/bin/kubelet --version | awk '{print $2}' || true)
 if [[ "$native" == true ]]; then
     [[ "$kubelet_v" == "v${K8S}" ]] ||
