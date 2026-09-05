@@ -114,7 +114,16 @@ jobs:
         with:
           enable-cache: true
       - run: uv sync
-      - run: sudo apt-get install -y $(uv run bindep -b)
+
+      # apt-get update first. GitHub-hosted runners ship with populated package
+      # lists, so upstream's ci.yaml can install straight away; the RaaS runner
+      # image is built from the same base but without them, and the install
+      # fails with "Unable to locate package debootstrap". Updating is correct
+      # on both.
+      - name: Install the diskimage-builder dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y $(uv run bindep -b)
 
       # The runner image is GitHub's, which carries no OpenStack client. Put it
       # in a throwaway venv rather than asking for a modified runner image:
