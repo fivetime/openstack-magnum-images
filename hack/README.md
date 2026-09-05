@@ -42,59 +42,70 @@ minor。它不报错，就是错。
 ## 大文件不过墙
 
 一个成品镜像 3.3 GB。**实测数据中心与 GitHub 之间约 0.6 MB/s —— 单个镜像
-25 分钟**，比构建本身还久；整个矩阵下来比其余所有环节加起来都贵。所以大文件
-在两个方向上都不跨这条边界：
+25 分钟**，比构建本身还久；整个矩阵下来比其余所有环节加起来都贵。所以镜像
+根本不跨这条边界：**构建、传 Glance、开机验证全在同一个 job、同一台 runner 上
+完成**，镜像从生成到使用都在数据中心内。
 
-| | 构建在哪 | 大文件去哪 | 穿墙 |
-|---|---|---|---|
-| **amd64** | 自建 runner（数据中心内） | → Glance（本地读缓存） | **零** |
-| **arm64** | GitHub 的 arm runner | → Release（都在 GitHub 侧） | **零** |
+跨出去的只有 manifest 和 sha256，几百字节。
 
-arm64 不推 Glance —— 本集群没有 arm64 计算节点，推上去也开不起来，还要把
-3.3 GB 拉回来。
+## 为什么是"一个 job 全包"而不是拆开
 
-**因此 GitHub Release 里放的是 manifest 和 sha256，不是镜像本体。** 镜像的去处
-是 Glance，那才是它被使用的地方。要一个可下载的归档，用数据中心内的 Ceph RGW，
-本地带宽。
+RaaS 的 runner 是**一次性**的：一个 job 一台全新 VM，跑完即销毁。所以
+job 之间没有可用的本地磁盘交接，缓存也留不住。
 
-## 三段都可单独重跑
+而**构建只要约 4 分钟**（实测 3m43s）。原本想用缓存避免的"重跑要从头再来"，
+在传输被消掉之后只剩这 4 分钟——比任何跨 job 交接机制都便宜。
 
 ```
-discover ─→ build ─→ release   （可选,默认关）
-                  └→ glance    （可选,默认关,仅 amd64）
+discover ──→ build ×N  (RaaS runner,每个矩阵项一台新 VM)
+              │  构建 → 挂载验证 → 传 Glance → 开机门禁
+              │  upload-artifact: 只有 manifest + sha256
+              ↓
+           release  (单个 job,非矩阵,ubuntu-latest)
+              download-artifact(全部) → 按 k8s 版本分组 → 建/更新 Release
 ```
 
-`build` 把成品放进 `IMAGE_CACHE`（默认 `/var/lib/magnum-images`，在工作区之外）：
+**矩阵各跑各的机器，怎么发 Release？** 这是 Actions 的标准解法：矩阵各自
+`upload-artifact`，再由一个**非矩阵**的汇总 job 全部下载后统一发布。好处是
+多台 runner 不会竞争创建同一个 tag，也不需要 `max-parallel: 1` 来回避竞态。
+因为传的只是元数据，这个汇总 job 跑在 GitHub 托管 runner 上就行。
 
+## runner 不需要任何改造
+
+GitHub 官方 runner 镜像（RaaS 用的就是它）已经满足 dib 的全部要求：免密
+sudo、loop device、`bindep.txt` 里那两个包（`debootstrap`、`qemu-utils`）由
+workflow 自己 `apt-get` 装。
+
+唯一缺的是 OpenStack 客户端，**装在 job 里的临时 venv**，不动机器：
+
+```yaml
+python3 -m venv "$RUNNER_TEMP/osc"
+"$RUNNER_TEMP/osc/bin/pip" -q install python-openstackclient python-magnumclient
+echo "$RUNNER_TEMP/osc/bin" >> "$GITHUB_PATH"
 ```
-<name>.raw            3.3 GB,不压缩——唯一的消费者是 Glance 上传,它要的就是 raw
-<name>.manifest.json
-<name>.raw.sha256
-```
 
-**上传失败可以只重跑那个 job**，不重新编译、也不用把 3.3 GB 取回来。这正是把
-构建和上传解耦的目的。缓存超过 `IMAGE_CACHE_DAYS`（默认 7 天）自动清理。
+⚠️ arm64 没有自建 runner（本地没有 arm64 硬件），走 GitHub 的 `ubuntu-24.04-arm`，
+**只发 Release 不进 Glance** —— 没有 arm64 计算节点，传上去也开不起来。
 
-两个开关：
+## 两个上传都是可选的
 
-- 手动触发时勾 `release=true` / `glance=true`
+- 手动触发勾 `release=true` / `glance=true`
 - 仓库变量 `RELEASE_ENABLED=true` / `GLANCE_ENABLED=true` 让定时任务也带上
 
 ## "已构建"由谁记录
 
-Release 变成可选之后，就不能只靠它了。`discover.sh` 现在认两处，任一命中即跳过：
+Release 变成可选之后，就不能只靠它了。`discover.sh` 认两处，任一命中即跳过：
 
-1. **本地缓存** `$IMAGE_CACHE/<name>.manifest.json` —— 两个上传都关掉时唯一的记录
+1. **本地缓存** `$IMAGE_CACHE/<name>.manifest.json`（常驻 runner 时才有意义）
 2. **Release 资产** —— 跨机器、跨缓存清空仍然有效
 
 判据是 **manifest 名**而不是 `.raw.gz`（Release 里已经没有镜像本体了）。
-
 它回答的只是"这个组合构建过没有"，不是"这个镜像好不好"，所以 prerelease 也算数。
-要把一个已构建的组合重新喂给上传环节，用 `force=true`。
+要重新构建一个已有的组合，用 `force=true`。
 
-`prerelease` 标记承载的是**门禁有没有用这个镜像启动过节点**：`gate.sh` 通过后
-`gh release edit --prerelease=false` 转正。同一个事实在 Glance 侧记在
-`boot_verified` 属性和镜像可见性上——那才是真正能拦住别人误用的地方。
+`prerelease` 标记承载的是**门禁有没有用这个镜像启动过节点**。汇总 job 只在
+该版本的**每一个** manifest 都 `boot_verified: true` 时才转正 —— 一个含 arm64
+的版本因此会一直是 prerelease，这是诚实的状态。
 
 ## 三条不肯让步的判据
 

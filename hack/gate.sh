@@ -321,6 +321,14 @@ reported=$(grep -o 'kubelet=[^ ]*' <<<"$result" | cut -d= -f2)
 log "gate passed; promoting image ${IMAGE_ID}"
 openstack image set --public --property boot_verified=true "$IMAGE_ID"
 
+# Record the verdict in the manifest as well. The manifest is what travels to
+# the release job, which has no way to ask Glance whether a node ever booted.
+if tmp=$(mktemp) && jq '.boot_verified = true' "$MANIFEST" >"$tmp"; then
+    mv -f "$tmp" "$MANIFEST"
+else
+    warn "could not record boot_verified in ${MANIFEST}"
+fi
+
 # A cluster template cannot be modified while a cluster references it, so the
 # durable template is replaced rather than updated. When the old one is in use,
 # keep it and publish a dated one beside it instead of failing.
