@@ -1,61 +1,72 @@
 #!/bin/bash
 # SPDX-License-Identifier: Apache-2.0
 #
-# Acceptance gate: prove a freshly built node image can carry a real
-# Kubernetes cluster before any tenant can select it.
+# Acceptance gate: boot one VM from the image and make it a Kubernetes node.
 #
 #   hack/gate.sh <image-id> <manifest-file>
 #
-# A build that merely finished is not evidence. This creates a throwaway
-# cluster template and cluster from the image on the real cloud, waits for the
-# control plane, checks every node reaches Ready and that a Deployment actually
-# rolls out, then tears the whole thing down. Only a cluster that came up
-# promotes the image to public and gets a durable cluster template.
+# The image's contract is one sentence: "a VM booted from me can become a
+# Kubernetes node." This tests exactly that, and nothing else.
 #
-# The image stays private when the gate does not run or does not pass. An
-# unverified image is not published as if it were verified.
+# Everything happens inside a single VM on one throwaway network:
+#
+#   - no load balancer, no floating IP, no router, no egress
+#   - no SSH: the test runs from cloud-init user-data and reports through the
+#     serial console, which `openstack console log show` reads without any
+#     network path to the VM
+#   - no image pulls: kubeadm uses the control-plane images baked into the
+#     image, the CNI is the bridge plugin shipped in /opt/cni/bin, and the
+#     workload pod runs with --image-pull-policy=Never
+#
+# The previous version built a real Magnum cluster. That tested Magnum, CAPO,
+# Octavia and Neutron far more than it tested the image, and it rejected a good
+# image twice for faults in those: once when a load balancer dropped the watch
+# `kubectl rollout status` depends on, once when Octavia held a vip_port_id
+# Neutron no longer had. It also churned the cloud it was testing on.
+#
+# Exit codes are the verdict, and they say who is at fault:
+#   0  the image is good
+#   1  the image is bad - it did not become a Kubernetes node
+#   2  the cloud could not run the test - says nothing about the image
 #
 # Environment:
-#   OS_CLOUD / OS_*      OpenStack auth (needs a project that can create clusters)
-#   GATE_FLAVOR          flavor for both master and worker (default magnum-medium)
-#   GATE_EXTERNAL_NET    external network (default public)
-#   GATE_DNS             cluster DNS nameserver (default 192.168.4.254)
-#   GATE_NETWORK_DRIVER  cilium|calico (default calico)
-#   GATE_TIMEOUT         seconds to wait for CREATE_COMPLETE (default 2700)
-#   GATE_KEEP            true to leave the cluster standing for debugging
-#   SKIP_GATE            true to skip the cluster test (arm64 has no compute here)
+#   OS_CLOUD / OS_*      OpenStack auth
+#   GATE_FLAVOR          flavor for the VM (default magnum-medium)
+#   GATE_TIMEOUT         seconds to wait for the verdict (default 900)
+#   GATE_KEEP            true to leave the VM and network for debugging
+#   SKIP_GATE            true to skip entirely (no arm64 compute here)
 
 set -Eeuo pipefail
 
-log()  { printf '[gate] %s\n' "$*"; }
-warn() { printf '[gate] %s\n' "$*" >&2; }
-die()  { printf '[gate] %s\n' "$*" >&2; exit 1; }
+log()     { printf '[gate] %s\n' "$*"; }
+warn()    { printf '[gate] %s\n' "$*" >&2; }
+die()     { printf '[gate] %s\n' "$*" >&2; exit 1; }        # image rejected
+env_die() { printf '[gate] ENV: %s\n' "$*" >&2; exit 2; }   # cloud unusable
 
-[[ $# -eq 2 ]] || die "usage: $0 <image-id> <manifest-file>"
+[[ $# -eq 2 ]] || env_die "usage: $0 <image-id> <manifest-file>"
 IMAGE_ID=$1
 MANIFEST=$2
-[[ -f "$MANIFEST" ]] || die "no such manifest: $MANIFEST"
+[[ -f "$MANIFEST" ]] || env_die "no such manifest: $MANIFEST"
 
-command -v openstack >/dev/null || die "the openstack client is required"
-command -v jq >/dev/null        || die "jq is required"
+command -v openstack >/dev/null || env_die "the openstack client is required"
+command -v jq >/dev/null        || env_die "jq is required"
 
 m() { jq -r --arg k "$1" 'if has($k) then .[$k] else "" end' "$MANIFEST"; }
 K8S=$(m k8s_version)
 ARCH=$(m arch)
-[[ -n "$K8S" && -n "$ARCH" ]] || die "manifest is missing k8s_version/arch"
+[[ -n "$K8S" && -n "$ARCH" ]] || env_die "manifest is missing k8s_version/arch"
 
 GATE_FLAVOR=${GATE_FLAVOR:-magnum-medium}
-GATE_EXTERNAL_NET=${GATE_EXTERNAL_NET:-public}
+GATE_TIMEOUT=${GATE_TIMEOUT:-900}
 GATE_DNS=${GATE_DNS:-192.168.4.254}
+GATE_SUBNET=${GATE_SUBNET:-10.180.0.0/24}
+# Used only when publishing the durable cluster template after a pass.
+GATE_EXTERNAL_NET=${GATE_EXTERNAL_NET:-public}
 GATE_NETWORK_DRIVER=${GATE_NETWORK_DRIVER:-calico}
-GATE_TIMEOUT=${GATE_TIMEOUT:-2700}
-# kube_tag is what the Cluster API driver reads to pick the Kubernetes version,
-# so it has to agree with the binaries actually baked into the image.
-# The client takes one comma-separated --labels value, not repeated --label.
 GATE_LABELS=${GATE_LABELS:-"kube_tag=v${K8S},octavia_provider=ovn,octavia_lb_algorithm=SOURCE_IP_PORT"}
+
 SUFFIX=${GITHUB_RUN_ID:-$(date +%s)}
-TMPL="gate-v${K8S}-${ARCH}-${SUFFIX}"
-CLUSTER="gate-v${K8S}-${ARCH}-${SUFFIX}"
+NAME="gate-v${K8S}-${ARCH}-${SUFFIX}"
 DURABLE_TMPL="k8s-v${K8S}"
 
 # ---------------------------------------------------------------- skip path
@@ -71,167 +82,169 @@ if [[ "${SKIP_GATE:-false}" == true ]]; then
 fi
 
 # ------------------------------------------------------------- preflight
-#
-# Check the fixtures the gate depends on before creating anything, so a
-# missing flavor fails in seconds instead of after a 45 minute cluster build.
-openstack flavor show "$GATE_FLAVOR" -c id -f value >/dev/null ||
-    die "flavor ${GATE_FLAVOR} not found"
-openstack network show "$GATE_EXTERNAL_NET" -c id -f value >/dev/null ||
-    die "external network ${GATE_EXTERNAL_NET} not found"
-openstack image show "$IMAGE_ID" -c id -f value >/dev/null ||
-    die "image ${IMAGE_ID} not found"
+openstack flavor show "$GATE_FLAVOR" -c id -f value >/dev/null 2>&1 ||
+    env_die "flavor ${GATE_FLAVOR} not found"
+openstack image show "$IMAGE_ID" -c id -f value >/dev/null 2>&1 ||
+    env_die "image ${IMAGE_ID} not found"
 
 WORK_DIR=$(mktemp -d)
-CLEAN_CLUSTER=false
-CLEAN_TMPL=false
+CLEAN_SERVER=false
+CLEAN_SUBNET=false
+CLEAN_NET=false
 
 cleanup() {
     local status=$?
     if [[ "${GATE_KEEP:-false}" == true ]]; then
-        warn "GATE_KEEP=true: leaving ${CLUSTER} standing"
+        warn "GATE_KEEP=true: leaving ${NAME} standing"
     else
-        if [[ "$CLEAN_CLUSTER" == true ]]; then
-            log "deleting cluster ${CLUSTER}"
-            openstack coe cluster delete "$CLUSTER" >/dev/null 2>&1 || true
-            # The template cannot be deleted while a cluster still references
-            # it, so wait the cluster out before touching the template.
-            local deadline=$((SECONDS + 1800))
+        if [[ "$CLEAN_SERVER" == true ]]; then
+            log "deleting server ${NAME}"
+            openstack server delete "$NAME" >/dev/null 2>&1 || true
+            # The subnet cannot go while the port is still attached.
+            local deadline=$((SECONDS + 300))
             while ((SECONDS < deadline)); do
-                openstack coe cluster show "$CLUSTER" >/dev/null 2>&1 || break
-                sleep 20
+                openstack server show "$NAME" >/dev/null 2>&1 || break
+                sleep 5
             done
         fi
-        if [[ "$CLEAN_TMPL" == true ]]; then
-            openstack coe cluster template delete "$TMPL" >/dev/null 2>&1 ||
-                warn "could not delete template ${TMPL}; remove it by hand"
-        fi
+        [[ "$CLEAN_SUBNET" == true ]] &&
+            { openstack subnet delete "$NAME" >/dev/null 2>&1 || warn "subnet ${NAME} left behind"; }
+        [[ "$CLEAN_NET" == true ]] &&
+            { openstack network delete "$NAME" >/dev/null 2>&1 || warn "network ${NAME} left behind"; }
     fi
     rm -rf -- "$WORK_DIR"
     return $status
 }
 trap cleanup EXIT
 
-# ------------------------------------------------------------- build it
-log "creating template ${TMPL} from image ${IMAGE_ID}"
-# --image takes the UUID on purpose: passing a name lets the client truncate it
-# at the first dot ("ubuntu-24.04-..." becomes "ubuntu-24") and the API answers
-# a bare HTTP 400.
-openstack coe cluster template create \
-    --coe kubernetes --server-type vm \
-    --image "$IMAGE_ID" \
-    --flavor "$GATE_FLAVOR" --master-flavor "$GATE_FLAVOR" \
-    --external-network "$GATE_EXTERNAL_NET" \
-    --network-driver "$GATE_NETWORK_DRIVER" \
-    --dns-nameserver "$GATE_DNS" \
-    --master-lb-enabled --floating-ip-enabled \
-    --labels "$GATE_LABELS" \
-    "$TMPL" >/dev/null
-CLEAN_TMPL=true
+# ------------------------------------------------------------- the test
+#
+# Everything this VM needs is already inside it, so the network has no router
+# and needs none. Nothing below reaches outside the VM.
+cat >"$WORK_DIR/user-data" <<EOF
+#!/bin/bash
+# Report through the serial console; the gate reads it with
+# \`openstack console log show\`, which needs no network path to this VM.
+exec > >(tee /dev/console) 2>&1
+set -x
 
-log "creating cluster ${CLUSTER} (1 master, 1 worker)"
-openstack coe cluster create \
-    --cluster-template "$TMPL" \
-    --master-count 1 --node-count 1 \
-    "$CLUSTER" >/dev/null
-CLEAN_CLUSTER=true
+fail() { echo "GATE_RESULT status=FAIL step=\$1"; exit 1; }
 
-log "waiting up to ${GATE_TIMEOUT}s for CREATE_COMPLETE"
-deadline=$((SECONDS + GATE_TIMEOUT))
-status=
-while ((SECONDS < deadline)); do
-    status=$(openstack coe cluster show "$CLUSTER" -f value -c status 2>/dev/null || echo UNKNOWN)
-    case "$status" in
-        CREATE_COMPLETE) break ;;
-        CREATE_FAILED|ERROR)
-            openstack coe cluster show "$CLUSTER" -f value -c status_reason || true
-            die "cluster reached ${status}" ;;
-    esac
-    sleep 30
+# The bridge plugin ships in /opt/cni/bin, so the node reaches Ready without
+# pulling a CNI image. A real CNI (Calico, Cilium) would need egress, which
+# would tie this verdict to the cloud's networking instead of to the image.
+# Single node, so no overlay and no NetworkPolicy is needed or tested.
+mkdir -p /etc/cni/net.d
+cat > /etc/cni/net.d/10-gate-bridge.conf <<'CNI'
+{"cniVersion":"1.0.0","name":"gate","type":"bridge","bridge":"cni0",
+ "isDefaultGateway":true,
+ "ipam":{"type":"host-local","subnet":"10.244.0.0/16","routes":[{"dst":"0.0.0.0/0"}]}}
+CNI
+
+# --kubernetes-version is pinned so kubeadm never queries dl.k8s.io, and every
+# image it needs was baked in by the kubernetes element.
+kubeadm init --kubernetes-version=v${K8S} \\
+             --pod-network-cidr=10.244.0.0/16 \\
+             --skip-phases=addon/kube-proxy || fail kubeadm-init
+
+export KUBECONFIG=/etc/kubernetes/admin.conf
+
+# Single node: without removing the control-plane taint the test pod stays
+# Pending forever and looks like a broken image.
+kubectl taint nodes --all node-role.kubernetes.io/control-plane- || true
+
+for i in \$(seq 1 60); do
+    kubectl get nodes \\
+      -o jsonpath='{.items[0].status.conditions[?(@.type=="Ready")].status}' \\
+      2>/dev/null | grep -q True && break
+    sleep 5
 done
-[[ "$status" == CREATE_COMPLETE ]] ||
-    die "cluster did not reach CREATE_COMPLETE within ${GATE_TIMEOUT}s (last: ${status})"
-log "cluster is CREATE_COMPLETE"
-
-# ------------------------------------------------------------- prove it
-export KUBECONFIG="$WORK_DIR/config"
-openstack coe cluster config "$CLUSTER" --dir "$WORK_DIR" --force >/dev/null
-command -v kubectl >/dev/null || die "kubectl is required to verify the cluster"
-
-# Everything below polls with short-lived requests instead of using
-# `kubectl wait` or `kubectl rollout status`.
-#
-# Those two hold a watch open, and this cluster's API server sits behind an
-# Octavia load balancer (master-lb-enabled). When the LB drops a long-lived
-# HTTP/2 connection the informer stops receiving events and keeps reporting
-# the last state it saw, so the command times out while the cluster is
-# already healthy - it fails the image for a fault in the path to the API,
-# not in the image. Observed exactly that: rollout status timed out on
-# "0 of 2 updated replicas are available" while `describe` on the same
-# cluster said "2 available | 0 unavailable, Available True".
-#
-# poll_until <what> <seconds> <command...> — retry until the command
-# succeeds, tolerating individual failures.
-poll_until() {
-    local what=$1 timeout=$2; shift 2
-    local deadline=$((SECONDS + timeout))
-    while ((SECONDS < deadline)); do
-        if "$@" >/dev/null 2>&1; then return 0; fi
-        sleep 10
-    done
-    warn "timed out waiting for ${what} after ${timeout}s"
-    return 1
-}
-
-nodes_all_ready() {
-    local total ready
-    total=$(kubectl get nodes -o json --request-timeout=20s |
-        jq '.items | length') || return 1
-    ready=$(kubectl get nodes -o json --request-timeout=20s |
-        jq '[.items[] | select(.status.conditions[]?
-             | select(.type == "Ready" and .status == "True"))] | length') || return 1
-    [[ "$total" -ge 2 && "$ready" -eq "$total" ]]
-}
-
-log "waiting for every node to reach Ready"
-poll_until "all nodes Ready" 600 nodes_all_ready ||
-    { kubectl get nodes -o wide || true; die "nodes did not become Ready"; }
 kubectl get nodes -o wide
 
-# A node reporting Ready only proves the kubelet registered. Rolling out a
-# Deployment additionally exercises the CRI, the CNI and the preloaded images,
-# which is what the image is actually responsible for.
-log "rolling out a smoke Deployment"
-kubectl create deployment gate-smoke --image=registry.k8s.io/pause:3.10 --replicas=2
+# --image-pull-policy=Never turns "the control-plane images really were
+# preloaded" into a hard assertion instead of a directory listing.
+kubectl run gate --image=registry.k8s.io/pause:3.10.2 --image-pull-policy=Never || fail pod-create
+kubectl wait --for=condition=Ready pod/gate --timeout=180s || fail pod-ready
 
-deployment_available() {
-    local avail
-    avail=$(kubectl get deployment gate-smoke -o jsonpath='{.status.availableReplicas}' \
-        --request-timeout=20s 2>/dev/null) || return 1
-    [[ "${avail:-0}" -eq 2 ]]
+KUBELET=\$(kubelet --version | awk '{print \$2}')
+NODE=\$(kubectl get nodes -o jsonpath='{.items[0].status.conditions[?(@.type=="Ready")].status}')
+POD=\$(kubectl get pod gate -o jsonpath='{.status.phase}')
+CTRD=\$(containerd --version | awk '{print \$3}')
+
+# One short line, last: the console log is size-capped, so the sentinel has to
+# survive sitting at the end of a long boot.
+echo "GATE_RESULT status=PASS kubelet=\${KUBELET} node_ready=\${NODE} pod=\${POD} containerd=\${CTRD}"
+EOF
+
+log "creating network ${NAME} (no router: the test needs no egress)"
+openstack network create "$NAME" >/dev/null 2>&1 || env_die "cannot create network"
+CLEAN_NET=true
+openstack subnet create "$NAME" --network "$NAME" --subnet-range "$GATE_SUBNET" \
+    --dns-nameserver "$GATE_DNS" >/dev/null 2>&1 || env_die "cannot create subnet"
+CLEAN_SUBNET=true
+
+log "booting ${NAME} from image ${IMAGE_ID}"
+# --config-drive: user-data has to arrive without a metadata route.
+openstack server create "$NAME" \
+    --image "$IMAGE_ID" --flavor "$GATE_FLAVOR" \
+    --network "$NAME" --config-drive true \
+    --user-data "$WORK_DIR/user-data" >/dev/null 2>&1 || env_die "cannot boot server"
+CLEAN_SERVER=true
+
+log "waiting for the VM to reach ACTIVE"
+deadline=$((SECONDS + 300)); status=
+while ((SECONDS < deadline)); do
+    status=$(openstack server show "$NAME" -f value -c status 2>/dev/null || echo UNKNOWN)
+    [[ "$status" == ACTIVE ]] && break
+    if [[ "$status" == ERROR ]]; then
+        openstack server show "$NAME" -f value -c fault >&2 2>/dev/null || true
+        env_die "VM went to ERROR before the image could be judged"
+    fi
+    sleep 10
+done
+[[ "$status" == ACTIVE ]] || env_die "VM did not reach ACTIVE (last: ${status})"
+log "VM is ACTIVE"
+
+# ------------------------------------------------------------- the verdict
+#
+# Poll the console log for the sentinel. Short-lived requests only: the last
+# gate trusted a long-lived watch and reported a failure the cluster did not
+# actually have.
+log "waiting up to ${GATE_TIMEOUT}s for GATE_RESULT on the console"
+deadline=$((SECONDS + GATE_TIMEOUT)); result=
+while ((SECONDS < deadline)); do
+    console=$(openstack console log show "$NAME" 2>/dev/null || true)
+    result=$(grep -o 'GATE_RESULT .*' <<<"$console" | tail -1 || true)
+    [[ -n "$result" ]] && break
+    sleep 15
+done
+
+dump_console() {
+    warn "last 40 console lines:"
+    openstack console log show "$NAME" 2>/dev/null | tail -40 >&2 || true
 }
 
-poll_until "gate-smoke to have 2 available replicas" 300 deployment_available ||
-    { kubectl describe deployment gate-smoke || true
-      kubectl get pods -l app=gate-smoke -o wide || true
-      die "smoke Deployment did not roll out"; }
-log "smoke Deployment has 2/2 replicas available"
-kubectl delete deployment gate-smoke --wait=false >/dev/null 2>&1 || true
+if [[ -z "$result" ]]; then
+    dump_console
+    die "the image never reported a result within ${GATE_TIMEOUT}s"
+fi
 
-# Confirm the node really runs the Kubernetes version the image claims; a
-# mismatch means the wrong binaries were baked in and every later assumption
-# about this image is wrong.
-node_version=$(kubectl get nodes -o jsonpath='{.items[0].status.nodeInfo.kubeletVersion}')
-[[ "$node_version" == "v${K8S}" ]] ||
-    die "kubelet reports ${node_version}, image claims v${K8S}"
-log "kubelet version matches: ${node_version}"
+log "$result"
+grep -q 'status=PASS' <<<"$result" || { dump_console; die "the image did not become a Kubernetes node"; }
+
+# The image is named for a Kubernetes version; a node running a different one
+# means the wrong binaries were baked in.
+reported=$(grep -o 'kubelet=[^ ]*' <<<"$result" | cut -d= -f2)
+[[ "$reported" == "v${K8S}" ]] ||
+    die "kubelet reports ${reported}, image claims v${K8S}"
 
 # ------------------------------------------------------------- publish it
 log "gate passed; promoting image ${IMAGE_ID}"
 openstack image set --public --property boot_verified=true "$IMAGE_ID"
 
 # A cluster template cannot be modified while a cluster references it, so the
-# durable template is replaced rather than updated. When the old one is still
-# in use, keep it and publish a dated one beside it instead of failing.
+# durable template is replaced rather than updated. When the old one is in use,
+# keep it and publish a dated one beside it instead of failing.
 if openstack coe cluster template show "$DURABLE_TMPL" >/dev/null 2>&1; then
     if openstack coe cluster template delete "$DURABLE_TMPL" >/dev/null 2>&1; then
         log "replaced existing template ${DURABLE_TMPL}"
@@ -250,6 +263,7 @@ openstack coe cluster template create \
     --dns-nameserver "$GATE_DNS" \
     --master-lb-enabled --floating-ip-enabled --public \
     --labels "$GATE_LABELS" \
-    "$DURABLE_TMPL" >/dev/null
+    "$DURABLE_TMPL" >/dev/null ||
+    warn "image promoted but template ${DURABLE_TMPL} could not be created"
 
 log "published template ${DURABLE_TMPL} -> image ${IMAGE_ID}"
