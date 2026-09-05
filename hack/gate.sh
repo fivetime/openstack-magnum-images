@@ -33,6 +33,7 @@
 #   OS_CLOUD / OS_*      OpenStack auth
 #   GATE_FLAVOR          flavor for the VM (default magnum-medium)
 #   GATE_TIMEOUT         seconds to wait for the verdict (default 900)
+#   GATE_BOOT_TIMEOUT    seconds to wait for nova to hand back ACTIVE (default 900)
 #   GATE_KEEP            true to leave the VM and network for debugging
 #   SKIP_GATE            true to skip entirely (no arm64 compute here)
 
@@ -58,6 +59,11 @@ ARCH=$(m arch)
 
 GATE_FLAVOR=${GATE_FLAVOR:-magnum-medium}
 GATE_TIMEOUT=${GATE_TIMEOUT:-900}
+# Time for nova to hand back an ACTIVE VM. Generous on purpose: this cloud also
+# runs RaaS, which refills its runner pool in batches, and a gate VM queued
+# behind that refill sat in BUILD past a 300s limit. A busy cloud is not a
+# failed image - and not a failed test either, just a slow one.
+GATE_BOOT_TIMEOUT=${GATE_BOOT_TIMEOUT:-900}
 GATE_DNS=${GATE_DNS:-192.168.4.254}
 GATE_SUBNET=${GATE_SUBNET:-10.180.0.0/24}
 # Used only when publishing the durable cluster template after a pass.
@@ -221,8 +227,8 @@ openstack server create "$NAME" \
     --user-data "$WORK_DIR/user-data" >/dev/null 2>&1 || env_die "cannot boot server"
 CLEAN_SERVER=true
 
-log "waiting for the VM to reach ACTIVE"
-deadline=$((SECONDS + 300)); status=
+log "waiting up to ${GATE_BOOT_TIMEOUT}s for the VM to reach ACTIVE"
+deadline=$((SECONDS + GATE_BOOT_TIMEOUT)); status=
 while ((SECONDS < deadline)); do
     status=$(openstack server show "$NAME" -f value -c status 2>/dev/null || echo UNKNOWN)
     [[ "$status" == ACTIVE ]] && break
