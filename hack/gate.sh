@@ -157,8 +157,43 @@ export KUBECONFIG="$WORK_DIR/config"
 openstack coe cluster config "$CLUSTER" --dir "$WORK_DIR" --force >/dev/null
 command -v kubectl >/dev/null || die "kubectl is required to verify the cluster"
 
+# Everything below polls with short-lived requests instead of using
+# `kubectl wait` or `kubectl rollout status`.
+#
+# Those two hold a watch open, and this cluster's API server sits behind an
+# Octavia load balancer (master-lb-enabled). When the LB drops a long-lived
+# HTTP/2 connection the informer stops receiving events and keeps reporting
+# the last state it saw, so the command times out while the cluster is
+# already healthy - it fails the image for a fault in the path to the API,
+# not in the image. Observed exactly that: rollout status timed out on
+# "0 of 2 updated replicas are available" while `describe` on the same
+# cluster said "2 available | 0 unavailable, Available True".
+#
+# poll_until <what> <seconds> <command...> — retry until the command
+# succeeds, tolerating individual failures.
+poll_until() {
+    local what=$1 timeout=$2; shift 2
+    local deadline=$((SECONDS + timeout))
+    while ((SECONDS < deadline)); do
+        if "$@" >/dev/null 2>&1; then return 0; fi
+        sleep 10
+    done
+    warn "timed out waiting for ${what} after ${timeout}s"
+    return 1
+}
+
+nodes_all_ready() {
+    local total ready
+    total=$(kubectl get nodes -o json --request-timeout=20s |
+        jq '.items | length') || return 1
+    ready=$(kubectl get nodes -o json --request-timeout=20s |
+        jq '[.items[] | select(.status.conditions[]?
+             | select(.type == "Ready" and .status == "True"))] | length') || return 1
+    [[ "$total" -ge 2 && "$ready" -eq "$total" ]]
+}
+
 log "waiting for every node to reach Ready"
-kubectl wait --for=condition=Ready nodes --all --timeout=600s ||
+poll_until "all nodes Ready" 600 nodes_all_ready ||
     { kubectl get nodes -o wide || true; die "nodes did not become Ready"; }
 kubectl get nodes -o wide
 
@@ -167,8 +202,19 @@ kubectl get nodes -o wide
 # which is what the image is actually responsible for.
 log "rolling out a smoke Deployment"
 kubectl create deployment gate-smoke --image=registry.k8s.io/pause:3.10 --replicas=2
-kubectl rollout status deployment/gate-smoke --timeout=300s ||
-    { kubectl describe deployment gate-smoke || true; die "smoke Deployment did not roll out"; }
+
+deployment_available() {
+    local avail
+    avail=$(kubectl get deployment gate-smoke -o jsonpath='{.status.availableReplicas}' \
+        --request-timeout=20s 2>/dev/null) || return 1
+    [[ "${avail:-0}" -eq 2 ]]
+}
+
+poll_until "gate-smoke to have 2 available replicas" 300 deployment_available ||
+    { kubectl describe deployment gate-smoke || true
+      kubectl get pods -l app=gate-smoke -o wide || true
+      die "smoke Deployment did not roll out"; }
+log "smoke Deployment has 2/2 replicas available"
 kubectl delete deployment gate-smoke --wait=false >/dev/null 2>&1 || true
 
 # Confirm the node really runs the Kubernetes version the image claims; a
