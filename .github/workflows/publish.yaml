@@ -125,6 +125,32 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y $(uv run bindep -b)
 
+      # The OpenStack API is published only under names the datacenter's own
+      # resolver knows. A RaaS runner does not use it: its subnet hands out no
+      # DNS server (dns_nameservers is ['::']) and the image falls back to a
+      # public resolver, so it reaches GitHub but gets NXDOMAIN for
+      # keystone.openstack.svc.cluster.local.
+      #
+      # The gateway routes by Host header, so the name has to stay in the URL -
+      # an IP would match no HTTPRoute. Seeding /etc/hosts keeps the name and
+      # supplies the address, without changing the runner image or the subnet.
+      #
+      # Set OS_GATEWAY_VIP to the gateway address (v4, v6, or both separated by
+      # spaces). Unset, this step does nothing and a runner that already
+      # resolves these names is unaffected.
+      - name: Point the OpenStack public names at the gateway
+        if: env.GLANCE == 'true' && vars.OS_GATEWAY_VIP != ''
+        run: |
+          services="keystone glance nova neutron cinder magnum octavia barbican placement"
+          for ip in ${{ vars.OS_GATEWAY_VIP }}; do
+              names=""
+              for svc in $services; do
+                  names="$names ${svc}.openstack.svc.cluster.local ${svc}.openstack ${svc}"
+              done
+              echo "${ip}${names}" | sudo tee -a /etc/hosts
+          done
+          getent hosts keystone.openstack.svc.cluster.local
+
       # The runner image is GitHub's, which carries no OpenStack client. Put it
       # in a throwaway venv rather than asking for a modified runner image:
       # anything that runs on a GitHub-hosted runner then runs here unchanged.
