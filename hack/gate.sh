@@ -134,7 +134,27 @@ cat >"$WORK_DIR/user-data" <<EOF
 exec > >(tee /dev/console) 2>&1
 set -x
 
-fail() { echo "GATE_RESULT status=FAIL step=\$1"; exit 1; }
+# A gate that says FAIL without saying why costs a full ten-minute cycle to
+# learn anything. Everything needed to tell "the image is broken" from "the
+# control plane was still settling" goes to the console before the verdict,
+# and the sentinel stays the last line.
+fail() {
+    echo "=== GATE DIAGNOSTICS (step=\$1) ==="
+    kubectl get nodes -o wide 2>&1 | tail -5
+    kubectl get pods -A -o wide 2>&1 | tail -20
+    kubectl describe pod gate 2>&1 | tail -30
+    kubectl get events -A --sort-by=.lastTimestamp 2>&1 | tail -20
+    echo "--- CNI ---"
+    ls -l /etc/cni/net.d/ 2>&1
+    ip -br addr 2>&1
+    echo "--- CRI images ---"
+    crictl images 2>&1 | head -15
+    echo "--- kubelet ---"
+    journalctl -u kubelet --no-pager -n 30 2>&1
+    echo "=== END DIAGNOSTICS ==="
+    echo "GATE_RESULT status=FAIL step=\$1"
+    exit 1
+}
 
 # The bridge plugin ships in /opt/cni/bin, so the node reaches Ready without
 # pulling a CNI image. A real CNI (Calico, Cilium) would need egress, which
@@ -270,9 +290,11 @@ while ((SECONDS < deadline)); do
     sleep 15
 done
 
+# Wide enough to carry the whole diagnostics block the VM prints before its
+# verdict; 40 lines cut it off and left two failures unexplained.
 dump_console() {
-    warn "last 40 console lines:"
-    openstack console log show "$NAME" 2>/dev/null | tail -40 >&2 || true
+    warn "last ${GATE_CONSOLE_LINES:-120} console lines:"
+    openstack console log show "$NAME" 2>/dev/null | tail -"${GATE_CONSOLE_LINES:-120}" >&2 || true
 }
 
 if [[ -z "$result" ]]; then
