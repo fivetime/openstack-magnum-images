@@ -1,0 +1,71 @@
+#!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+#
+# Install gVisor (runsc) and its containerd shim.
+#
+# Runs at 75 so the containerd element's 70-containerd has already written
+# /etc/containerd/config.toml for this drop-in to sit beside.
+#
+# gVisor is a good fit for a Cluster API node image where Kata is not: runsc
+# is a static userspace binary with no kernel module, and the systrap platform
+# needs no /dev/kvm at all. A Magnum node is itself a guest on a compute node
+# that is often already a guest, so anything demanding another layer of
+# hardware virtualisation cannot be relied on.
+
+if [ ${DIB_DEBUG_TRACE:-1} -gt 0 ]; then
+    set -x
+fi
+
+set -eu
+set -o pipefail
+
+# gVisor publishes a rolling "latest" pointer per architecture rather than
+# tagged releases, plus a sha512 for every artifact.
+DIB_GVISOR_RELEASE=${DIB_GVISOR_RELEASE:-latest}
+case "${ARCH}" in
+    amd64) GVISOR_ARCH=x86_64 ;;
+    arm64) GVISOR_ARCH=aarch64 ;;
+    *) echo "gvisor: unsupported architecture ${ARCH}" >&2; exit 1 ;;
+esac
+DIB_GVISOR_URL=${DIB_GVISOR_URL:-"https://storage.googleapis.com/gvisor/releases/release/${DIB_GVISOR_RELEASE}/${GVISOR_ARCH}"}
+
+# systrap by default: it uses ptrace/seccomp only. The kvm platform is faster
+# but needs /dev/kvm inside the node, which nested virtualisation does not
+# reliably provide. Override with DIB_GVISOR_PLATFORM=kvm where it is known
+# to exist.
+DIB_GVISOR_PLATFORM=${DIB_GVISOR_PLATFORM:-systrap}
+
+TMPDIR=$(mktemp -d)
+trap "rm -rf $TMPDIR" EXIT
+
+cd "${TMPDIR}"
+for f in runsc containerd-shim-runsc-v1; do
+    curl -fsSLO "${DIB_GVISOR_URL}/${f}"
+    curl -fsSLO "${DIB_GVISOR_URL}/${f}.sha512"
+done
+sha512sum -c runsc.sha512 containerd-shim-runsc-v1.sha512
+
+install -m 755 runsc /usr/bin/runsc
+install -m 755 containerd-shim-runsc-v1 /usr/bin/containerd-shim-runsc-v1
+
+install -d -o root -g root -m 755 /etc/containerd
+cat >/etc/containerd/runsc.toml <<EOF
+platform = "${DIB_GVISOR_PLATFORM}"
+EOF
+
+# containerd 2.x reads drop-ins from imports; the containerd element generates
+# a full config.toml, so register the runtime by appending rather than by
+# dropping a second file that nothing imports.
+cat >>/etc/containerd/config.toml <<'EOF'
+
+[plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.gvisor]
+  runtime_type = 'io.containerd.runsc.v1'
+
+  [plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.gvisor.options]
+    TypeUrl = 'io.containerd.runsc.v1.options'
+    ConfigPath = '/etc/containerd/runsc.toml'
+EOF
+
+# Fail the build here rather than shipping a config containerd will reject at
+# first boot, when the node is already half-way through joining a cluster.
+containerd --config /etc/containerd/config.toml config dump >/dev/null
