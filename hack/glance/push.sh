@@ -143,8 +143,17 @@ if [[ -n "$old_id" && "$old_id" != "$image_id" ]]; then
     if openstack image delete "$old_id" >/dev/null 2>&1; then
         log "  retired previous image ${old_id}"
     else
-        # A CoW parent with live clones cannot be deleted; that is expected.
-        warn "  previous image ${old_id} kept (in use by clones)"
+        # A CoW parent with live clones cannot be deleted, and that is expected
+        # - but leaving it under the same name is not. Two images called
+        # ubuntu-24.04-v1.37.0-amd64 make every later `image show <name>`
+        # ambiguous, including the one a cluster template resolves. Rename the
+        # old one so the name keeps pointing at exactly one image.
+        superseded="${NAME}-superseded-$(date +%Y%m%d-%H%M)"
+        if openstack image set --name "$superseded" "$old_id" >/dev/null 2>&1; then
+            warn "  previous image ${old_id} still has clones; renamed to ${superseded}"
+        else
+            warn "  previous image ${old_id} kept AND still named ${NAME}: the name is now ambiguous"
+        fi
     fi
 fi
 

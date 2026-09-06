@@ -333,11 +333,22 @@ fi
 # durable template is replaced rather than updated. When the old one is in use,
 # keep it and publish a dated one beside it instead of failing.
 if openstack coe cluster template show "$DURABLE_TMPL" >/dev/null 2>&1; then
-    if openstack coe cluster template delete "$DURABLE_TMPL" >/dev/null 2>&1; then
-        log "replaced existing template ${DURABLE_TMPL}"
+    # `template delete` is asynchronous: it answers "Request to delete ...
+    # accepted" and exits 0 even when the delete then fails because a cluster
+    # still references the template. Trusting that exit code produced two
+    # templates with the same name, which makes every later `show <name>`
+    # ambiguous. So check the template is actually gone.
+    openstack coe cluster template delete "$DURABLE_TMPL" >/dev/null 2>&1 || true
+    deadline=$((SECONDS + 60))
+    while ((SECONDS < deadline)); do
+        openstack coe cluster template show "$DURABLE_TMPL" >/dev/null 2>&1 || break
+        sleep 5
+    done
+    if openstack coe cluster template show "$DURABLE_TMPL" >/dev/null 2>&1; then
+        DURABLE_TMPL="k8s-v${K8S}-$(date +%Y%m%d-%H%M)"
+        warn "existing template is still referenced by a cluster; publishing ${DURABLE_TMPL} instead"
     else
-        DURABLE_TMPL="k8s-v${K8S}-$(date +%Y%m%d)"
-        warn "existing template is in use by a cluster; publishing ${DURABLE_TMPL} instead"
+        log "replaced existing template k8s-v${K8S}"
     fi
 fi
 
