@@ -119,6 +119,37 @@ if [[ -d "$MNT/var/lib/containerd" ]] &&
     images_preloaded=true
 fi
 
+# The sandbox image containerd is configured to use must be one of the images
+# that were actually preloaded. These are chosen by different things - the
+# preloaded set follows the Kubernetes version through kubeadm, containerd's
+# default follows the containerd version - so they can disagree, and when they
+# do the node cannot start a single pod without egress to registry.k8s.io.
+#
+# That failure used to surface 20 minutes later in the acceptance gate, as
+# kubeadm init timing out with a DNS error. It belongs here, where the build
+# that produced it is still on screen.
+#
+# Compared as whole references, not with a substring match: "pause:3.10" is a
+# prefix of "pause:3.10.2", so a plain grep passes on exactly the mismatch this
+# is here to catch.
+sandbox_image=$(awk -F'"' '/^[[:space:]]*sandbox_image[[:space:]]*=/{print $2; exit}' \
+                "$MNT/etc/containerd/config.toml")
+[[ -n "$sandbox_image" ]] || die "containerd config names no sandbox_image"
+meta_db="$MNT/var/lib/containerd/io.containerd.metadata.v1.bolt/meta.db"
+if [[ "$images_preloaded" == true && -f "$meta_db" ]]; then
+    if grep -oa "${sandbox_image%:*}:[A-Za-z0-9._-]*" "$meta_db" | sort -u |
+           grep -qx -- "$sandbox_image"; then
+        log "sandbox image is preloaded: ${sandbox_image}"
+    else
+        log "preloaded references for ${sandbox_image%:*}:"
+        grep -oa "${sandbox_image%:*}:[A-Za-z0-9._-]*" "$meta_db" | sort -u |
+            sed 's/^/[verify]   /' >&2 || true
+        die "containerd will ask for ${sandbox_image}, which was not preloaded; the first pod sandbox would have to pull it"
+    fi
+else
+    log "no containerd metadata to check the sandbox image against"
+fi
+
 # Optional runtimes. Recorded only when actually present, and - for crun -
 # only when containerd is really configured to execute it: having the binary
 # on the image proves nothing about which runtime a pod gets.

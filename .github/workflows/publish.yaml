@@ -126,7 +126,11 @@ jobs:
       contents: read
     env:
       NAME: ${{ matrix.os_name }}-${{ matrix.os_version }}-v${{ matrix.k8s }}-${{ matrix.arch }}
-      GLANCE: ${{ inputs.glance == true || vars.GLANCE_ENABLED == 'true' }}
+      # matrix.in_datacenter is the half that is easy to forget: a GitHub-hosted
+      # runner has no route to the OpenStack API, so asking it to upload builds
+      # the image and then fails on a connection that could never have worked.
+      # That is what every arm64 job did until this was added.
+      GLANCE: ${{ (inputs.glance == true || vars.GLANCE_ENABLED == 'true') && matrix.in_datacenter }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: step-security/setup-uv@edab89485182ad96613ff847804c272ab5d1e03f # v10.0.0
@@ -299,6 +303,10 @@ jobs:
           OS_REGION_NAME: ${{ secrets.OS_REGION_NAME }}
           OS_IDENTITY_API_VERSION: "3"
           OS_INTERFACE: ${{ vars.OS_INTERFACE || 'public' }}
+          # Redundant with the GLANCE guard above, which already keeps this step
+          # from running off-site; kept because it is the gate's own contract -
+          # it cannot boot an image for an architecture this cloud has no
+          # compute for, whatever runner asked it to.
           SKIP_GATE: ${{ matrix.arch != 'amd64' }}
           GATE_FLAVOR: ${{ vars.GATE_FLAVOR || 'magnum-medium' }}
           GATE_DNS: ${{ vars.GATE_DNS || '192.168.4.254' }}

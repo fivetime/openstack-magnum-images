@@ -1,20 +1,53 @@
 # kata
 
-装 Kata Containers 及其自带的 VMM（QEMU / cloud-hypervisor / firecracker /
-Dragonball），并在 containerd 里注册五个 runtime handler：
+装 Kata Containers 及其自带的 VMM（QEMU / cloud-hypervisor / OpenVMM /
+Dragonball），并在 containerd 里注册五个 runtime handler。
+
+## 4.x 只有 Rust 运行时（这条决定了下面所有命名）
+
+Kata 4.x **把发行包拆成了两个**：
 
 ```
-kata-qemu              Go 运行时 + QEMU
-kata-clh               Go 运行时 + cloud-hypervisor
-kata-qemu-runtime-rs   Rust 运行时 + QEMU
-kata-clh-runtime-rs    Rust 运行时 + cloud-hypervisor
-kata-dragonball        Rust 运行时,Dragonball 内置于 shim
+kata-static-4.1.0-amd64.tar.zst       969 MB   只有 runtime-rs(Rust)
+kata-go-static-4.1.0-amd64.tar.zst   1219 MB   Go 运行时
 ```
 
-**`kata-fc`（firecracker）没有注册** —— 它要 `devmapper` snapshotter，而
-devmapper 需要真实块设备上的 LVM thin pool，镜像做不到（依赖节点的磁盘）。
-硬注册只会得到一个"收下 Pod 然后失败"的 handler。`configuration-fc.toml`
-已经装进镜像，节点自己配好 devmapper 后用 drop-in 补上即可。
+本元素只装前者。所以镜像里：
+
+```
+/opt/kata/runtime-rs/bin/containerd-shim-kata-v2    唯一的 shim
+/opt/kata/bin/{qemu-system-*,cloud-hypervisor,openvmm}
+/opt/kata/share/defaults/kata-containers/runtime-rs/*.toml
+```
+
+**没有 kata-runtime、kata-monitor、firecracker、jailer**，而且
+`share/defaults/kata-containers/configuration.toml` 是个**指向不存在文件的
+悬空符号链接**（指 `configuration-qemu.toml`，那个文件在 Go 包里）。照 3.x
+写的元素在这里会一个配置都拷不出来 —— 2026-09-06 就是这么炸的，被元素**自己
+末尾那段校验**拦下的，所以那段校验必须留着。
+
+Go 运行时上游已经弃用，为了保住几个名字再塞 1.2 GB 不划算。**改成把那几个
+名字做成别名。**
+
+## 注册了哪五个
+
+| handler | 实际运行 | 配置 |
+|---|---|---|
+| `kata-qemu` | runtime-rs + QEMU | `configuration-qemu-runtime-rs.toml` |
+| `kata-qemu-runtime-rs` | 同上（同一个 shim、同一份配置） | 同上 |
+| `kata-clh` | runtime-rs + cloud-hypervisor | `configuration-clh-runtime-rs.toml` |
+| `kata-clh-runtime-rs` | 同上 | 同上 |
+| `kata-dragonball` | runtime-rs，Dragonball 内置于 shim | `configuration-dragonball.toml` |
+
+`kata-qemu` / `kata-clh` 是**别名**。上游把这两个名字留给 Go 运行时，但我们
+不装 Go 运行时，所以不冲突；而**每一篇教程、每一个 RuntimeClass 例子、
+magnum-cluster-api 那份清单写的都是这两个名字**，租户写熟悉的名字应该得到一个
+Pod，而不是一个 Forbidden。哪天真把 Go 运行时加进来，冲突会**在这个文件里
+当场炸掉**，而不是在运行时静悄悄走错分支。
+
+**`kata-fc`（firecracker）没有注册**，4.x 里也注册不了 —— **二进制根本不在这个
+包里**。它还要 `devmapper` snapshotter，而 devmapper 需要真实块设备上的 LVM
+thin pool，镜像做不到（依赖节点的磁盘）。
 
 **默认启用**，和 `gvisor`、`crun` 一起烘进同一张镜像 —— 租户在自己的 Pod 里写
 `runtimeClassName` 选，而不是换一张镜像、换一个集群。下面两条是启用它带来的

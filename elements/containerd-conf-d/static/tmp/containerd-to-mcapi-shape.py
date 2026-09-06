@@ -6,13 +6,34 @@
 # A separate file so it can be tested against a real generated config before it
 # ever runs in a build - the reason the crun element's edit is also a file.
 #
-# The sandbox image is read out of the existing config rather than hardcoded.
+# WHICH PAUSE IMAGE
+#
+# kubeadm decides this, not containerd, and the two do not agree.
+#
+# The image preloads exactly the images `kubeadm config images pull
+# --kubernetes-version=X` names, so the pause it carries follows the Kubernetes
+# version. containerd's generated config names whatever pause that containerd
+# release defaults to, and hack/versions.sh installs the newest containerd for
+# every Kubernetes version - so the two match only by coincidence. They matched
+# for 1.37.0 and did not for 1.34.11, where containerd asked for pause:3.10.2,
+# the image carried the one kubeadm wanted, and on the gate's deliberately
+# egress-free network kubeadm init failed with
+#
+#     failed to pull image "registry.k8s.io/pause:3.10.2" ...
+#     lookup registry.k8s.io on 127.0.0.53:53: server misbehaving
+#
+# So kubeadm is the authority. SANDBOX_IMAGE carries its answer in; reading it
+# back out of containerd's own config is the fallback for a build where kubeadm
+# could not be asked, which is better than nothing but is the thing that was
+# wrong.
+#
 # containerd 2.x calls the key `sandbox` under
 # plugins.'io.containerd.cri.v1.runtime'; the version 2 schema calls it
-# `sandbox_image` under plugins."io.containerd.grpc.v1.cri". Getting this wrong
+# `sandbox_image` under plugins."io.containerd.grpc.v1.cri". Getting that wrong
 # means the first pod sandbox pulls pause from a registry instead of using the
 # copy the image already carries, which on a node with no egress is a hang
 # rather than an error.
+import os
 import pathlib
 import re
 import sys
@@ -20,12 +41,16 @@ import sys
 CONFIG = pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else "/etc/containerd/config.toml")
 text = CONFIG.read_text()
 
-match = re.search(r"""^\s*sandbox\s*=\s*['"]([^'"]+)['"]""", text, re.M)
-if not match:
-    match = re.search(r"""^\s*sandbox_image\s*=\s*['"]([^'"]+)['"]""", text, re.M)
-if not match:
-    raise SystemExit("containerd-conf-d: no sandbox image found in the config")
-sandbox = match.group(1)
+sandbox = os.environ.get("SANDBOX_IMAGE", "").strip()
+source = "kubeadm"
+if not sandbox:
+    source = "containerd config (kubeadm was not available)"
+    match = re.search(r"""^\s*sandbox\s*=\s*['"]([^'"]+)['"]""", text, re.M)
+    if not match:
+        match = re.search(r"""^\s*sandbox_image\s*=\s*['"]([^'"]+)['"]""", text, re.M)
+    if not match:
+        raise SystemExit("containerd-conf-d: no sandbox image found in the config")
+    sandbox = match.group(1)
 
 # Carry over disabled_plugins. The containerd element sets it for a reason its
 # own comment states: "These plugins also prevent containerd from running
@@ -60,4 +85,7 @@ imports = ["/etc/containerd/conf.d/*.toml"]
     SystemdCgroup = true
 """
 )
-print(f"containerd-conf-d: reshaped; sandbox={sandbox}; {disabled_line.strip() or 'no disabled_plugins carried over'}")
+print(
+    f"containerd-conf-d: reshaped; sandbox={sandbox} (from {source}); "
+    f"{disabled_line.strip() or 'no disabled_plugins carried over'}"
+)

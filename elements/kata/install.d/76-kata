@@ -57,8 +57,37 @@ sha256sum "kata-static-${DIB_KATA_VERSION}-${KATA_ARCH}.tar.zst" > /etc/kata-sta
 # The tarball is rooted at /opt/kata.
 tar --zstd -xf "kata-static-${DIB_KATA_VERSION}-${KATA_ARCH}.tar.zst" -C /
 
-for b in cloud-hypervisor containerd-shim-kata-v2 firecracker jailer \
-         kata-collect-data.sh kata-monitor kata-runtime "qemu-system-x86_64"; do
+# WHAT IS ACTUALLY IN THIS TARBALL
+#
+# Kata 4.x split the release in two. kata-static carries the Rust runtime
+# (runtime-rs) only; the Go runtime moved to a separate kata-go-static tarball
+# that is another 1.2 GB. So this image has, and can only register, the
+# runtime-rs shim:
+#
+#     /opt/kata/runtime-rs/bin/containerd-shim-kata-v2   the only shim
+#     /opt/kata/bin/{qemu-system-*,cloud-hypervisor,openvmm}
+#     /opt/kata/share/defaults/kata-containers/runtime-rs/*.toml
+#
+# There is no kata-runtime, no kata-monitor, no firecracker and no jailer, and
+# share/defaults/kata-containers/configuration.toml is a symlink to a
+# configuration-qemu.toml that this tarball does not contain. An element
+# written for 3.x silently produced no configs at all and was caught only by
+# its own check at the end - which is why that check stays.
+#
+# The Go runtime is deprecated upstream; shipping 1.2 GB more to keep a
+# deprecated runtime alive is not a trade worth making. Its familiar handler
+# names are kept as aliases instead, below.
+SHIM=/opt/kata/runtime-rs/bin/containerd-shim-kata-v2
+[ -x "$SHIM" ] ||
+    { echo "kata: ${SHIM} is missing; the tarball layout has changed again" >&2; exit 1; }
+
+# Anything containerd is told to run by path does not need to be on PATH, but
+# the shim being there makes `runtime_type` alone work and makes the node
+# debuggable by hand. The rest are linked when present, so a future tarball
+# that brings the Go tools back needs no change here.
+ln -sfn "$SHIM" /usr/local/bin/containerd-shim-kata-v2
+for b in cloud-hypervisor openvmm firecracker jailer kata-collect-data.sh \
+         kata-monitor kata-runtime qemu-system-x86_64 qemu-system-aarch64; do
     [ -e "/opt/kata/bin/$b" ] && ln -sfn "/opt/kata/bin/$b" "/usr/local/bin/$b"
 done
 
@@ -66,87 +95,66 @@ done
 # at boot rather than here: this is a chroot with the build host's kernel.
 printf 'vhost_vsock\nvhost_net\n' > /etc/modules-load.d/kata.conf
 
+DEFAULTS=/opt/kata/share/defaults/kata-containers/runtime-rs
 install -d -m 755 /etc/kata-containers
-for c in configuration-qemu.toml configuration-clh.toml configuration-fc.toml; do
-    [ -f "/opt/kata/share/defaults/kata-containers/$c" ] &&
-        cp "/opt/kata/share/defaults/kata-containers/$c" "/etc/kata-containers/$c"
-done
-# The Go runtime reads configuration.toml; give it the QEMU one.
-[ -f /etc/kata-containers/configuration-qemu.toml ] &&
-    cp /etc/kata-containers/configuration-qemu.toml /etc/kata-containers/configuration.toml
 for c in configuration-qemu-runtime-rs.toml configuration-clh-runtime-rs.toml \
          configuration-dragonball.toml; do
-    [ -f "/opt/kata/share/defaults/kata-containers/runtime-rs/$c" ] &&
-        cp "/opt/kata/share/defaults/kata-containers/runtime-rs/$c" "/etc/kata-containers/$c"
+    [ -f "${DEFAULTS}/$c" ] && cp "${DEFAULTS}/$c" "/etc/kata-containers/$c"
 done
+# Tools that read configuration.toml with no further argument get the QEMU one,
+# the same default upstream's own symlink points at.
+[ -f /etc/kata-containers/configuration-qemu-runtime-rs.toml ] &&
+    cp /etc/kata-containers/configuration-qemu-runtime-rs.toml \
+       /etc/kata-containers/configuration.toml
 
 # Register the handlers. privileged_without_host_devices is required: a
 # privileged Kata pod must not be handed the host's devices, because the
 # workload runs in a guest and those nodes mean nothing there.
+#
+# Five names for three runtimes. kata-qemu and kata-clh are aliases for the
+# runtime-rs entries, because those are the names every tutorial, every
+# RuntimeClass example and magnum-cluster-api's own list use, and a tenant who
+# writes the familiar name should get a pod rather than a Forbidden. Upstream
+# reserves those two names for the Go runtime; we do not ship it, so nothing
+# collides - and if the Go runtime is ever added here, it collides loudly in
+# this file rather than silently at runtime.
+#
 # A drop-in, not an append to config.toml: magnum-cluster-api replaces that
 # file at first boot and only conf.d survives. Version 2 schema to match the
 # template it writes.
 install -d -o root -g root -m 755 /etc/containerd/conf.d
-cat >/etc/containerd/conf.d/50-kata.toml <<'CTR'
+cat >/etc/containerd/conf.d/50-kata.toml <<CTR
 version = 2
 
-
-[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.kata-qemu]
+$(for pair in "kata-qemu:configuration-qemu-runtime-rs.toml" \
+              "kata-qemu-runtime-rs:configuration-qemu-runtime-rs.toml" \
+              "kata-clh:configuration-clh-runtime-rs.toml" \
+              "kata-clh-runtime-rs:configuration-clh-runtime-rs.toml" \
+              "kata-dragonball:configuration-dragonball.toml"; do
+    name=${pair%%:*}; conf=${pair#*:}
+    cat <<ENTRY
+[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.${name}]
   runtime_type = 'io.containerd.kata.v2'
+  runtime_path = '${SHIM}'
   privileged_without_host_devices = true
   pod_annotations = ['io.katacontainers.*']
   container_annotations = ['io.katacontainers.*']
-  [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.kata-qemu.options]
-    ConfigPath = '/etc/kata-containers/configuration-qemu.toml'
+  [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.${name}.options]
+    ConfigPath = '/etc/kata-containers/${conf}'
 
-[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.kata-clh]
-  runtime_type = 'io.containerd.kata.v2'
-  privileged_without_host_devices = true
-  pod_annotations = ['io.katacontainers.*']
-  container_annotations = ['io.katacontainers.*']
-  [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.kata-clh.options]
-    ConfigPath = '/etc/kata-containers/configuration-clh.toml'
-
-[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.kata-dragonball]
-  runtime_type = 'io.containerd.kata.v2'
-  runtime_path = '/opt/kata/runtime-rs/bin/containerd-shim-kata-v2'
-  privileged_without_host_devices = true
-  pod_annotations = ['io.katacontainers.*']
-  container_annotations = ['io.katacontainers.*']
-  [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.kata-dragonball.options]
-    ConfigPath = '/etc/kata-containers/configuration-dragonball.toml'
-
-[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.kata-qemu-runtime-rs]
-  runtime_type = 'io.containerd.kata.v2'
-  runtime_path = '/opt/kata/runtime-rs/bin/containerd-shim-kata-v2'
-  privileged_without_host_devices = true
-  pod_annotations = ['io.katacontainers.*']
-  container_annotations = ['io.katacontainers.*']
-  [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.kata-qemu-runtime-rs.options]
-    ConfigPath = '/etc/kata-containers/configuration-qemu-runtime-rs.toml'
-
-[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.kata-clh-runtime-rs]
-  runtime_type = 'io.containerd.kata.v2'
-  runtime_path = '/opt/kata/runtime-rs/bin/containerd-shim-kata-v2'
-  privileged_without_host_devices = true
-  pod_annotations = ['io.katacontainers.*']
-  container_annotations = ['io.katacontainers.*']
-  [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.kata-clh-runtime-rs.options]
-    ConfigPath = '/etc/kata-containers/configuration-clh-runtime-rs.toml'
+ENTRY
+done)
 CTR
 
-# kata-fc is deliberately not registered. Firecracker requires the devmapper
+# kata-fc (firecracker) is deliberately not registered, and in 4.x it could not
+# be: the binary is not in this tarball at all. It also requires the devmapper
 # snapshotter, which needs an LVM thin pool on a real block device - something
-# an image cannot create, because it depends on the node's disks. Registering
-# it anyway would publish a handler that accepts pods and then fails them.
-# configuration-fc.toml is installed, so a node that does set up devmapper can
-# add the handler with a drop-in.
+# an image cannot create, because it depends on the node's disks.
 
 # Every registered handler must have the config file it points at, or the
 # failure surfaces as a pod that will not start rather than a build that did.
-for c in configuration-qemu.toml configuration-clh.toml \
-         configuration-dragonball.toml configuration-qemu-runtime-rs.toml \
-         configuration-clh-runtime-rs.toml; do
+for c in configuration-qemu-runtime-rs.toml configuration-clh-runtime-rs.toml \
+         configuration-dragonball.toml; do
     [ -f "/etc/kata-containers/$c" ] ||
         { echo "kata: registered a handler but /etc/kata-containers/$c is missing" >&2; exit 1; }
 done

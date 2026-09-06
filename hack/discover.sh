@@ -47,6 +47,24 @@ ARCH_LIST=${ARCH_LIST:-"amd64 arm64"}
 RUNNER_AMD64=${RUNNER_AMD64:-ubuntu-24.04}
 RUNNER_ARM64=${RUNNER_ARM64:-ubuntu-24.04-arm}
 
+# Whether a runner can reach the OpenStack API at all, emitted per matrix entry
+# as `in_datacenter`. The Glance upload and the acceptance gate are the two
+# steps that need it, and a GitHub-hosted runner has no route: the public
+# endpoints resolve only through the datacenter's own resolver, and seeding
+# /etc/hosts with the gateway VIP does not create a path to it. Left ungated,
+# every arm64 job built its image and then failed on a connection that could
+# never have worked.
+#
+# Keyed on the runner rather than on the architecture, because that is the
+# actual condition. With BUILD_RUNNER unset, amd64 lands on a GitHub runner too
+# and has exactly the same problem.
+in_datacenter() {
+    case "$1" in
+        ubuntu-*|windows-*|macos-*|"") return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
 REPO=${GITHUB_REPOSITORY:-fivetime/openstack-magnum-images}
 EOL_API=${EOL_API:-https://endoflife.date/api/v1/products/kubernetes}
 DL_K8S=${DL_K8S:-https://dl.k8s.io/release}
@@ -146,7 +164,7 @@ main() {
     mapfile -t versions < <(resolve_versions)
     ((${#versions[@]})) || { log "no Kubernetes versions to build"; exit 1; }
 
-    local include=() os arch k8s name version element release runner asset
+    local include=() os arch k8s name version element release runner asset dc
     for k8s in "${versions[@]}"; do
         while read -r os; do
             [[ -n "$os" ]] || continue
@@ -165,13 +183,15 @@ main() {
                     log "skip ${asset} (published)"
                     continue
                 fi
+                if in_datacenter "$runner"; then dc=true; else dc=false; fi
                 include+=("$(jq -nc \
                     --arg os "$os" --arg os_name "$name" --arg os_version "$version" \
                     --arg element "$element" --arg release "$release" \
                     --arg k8s "$k8s" --arg arch "$arch" --arg runner "$runner" \
+                    --argjson in_datacenter "$dc" \
                     '{os:$os, os_name:$os_name, os_version:$os_version,
                       element:$element, release:$release, k8s:$k8s,
-                      arch:$arch, runner:$runner}')")
+                      arch:$arch, runner:$runner, in_datacenter:$in_datacenter}')")
             done
         done <<<"$OS_LIST"
     done

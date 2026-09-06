@@ -49,6 +49,30 @@ set -o pipefail
 
 install -d -o root -g root -m 755 /etc/containerd/conf.d
 
+# Ask kubeadm which pause image this Kubernetes version wants, and hand that to
+# the reshaper. `images list` computes the answer from the pinned version - it
+# needs no network and does not pull - and it is the same list the kubernetes
+# element's post-install.d/80-kubeadm-pull actually preloads, which is what
+# makes the two agree. Reading it back out of containerd's generated config
+# instead follows the containerd version, and the two versions are chosen
+# independently here.
+#
+# Not fatal when it cannot be answered: the reshaper falls back to the config
+# value and says which source it used, so the build log carries the difference.
+# 70-kubeadm has already installed the binary by the time this runs.
+SANDBOX_IMAGE=""
+if command -v kubeadm >/dev/null 2>&1 && [ -n "${DIB_KUBERNETES_VERSION:-}" ]; then
+    SANDBOX_IMAGE=$(kubeadm config images list \
+        --kubernetes-version="${DIB_KUBERNETES_VERSION}" 2>/dev/null |
+        grep -E '(^|/)pause:' | head -1) || SANDBOX_IMAGE=""
+fi
+if [ -n "$SANDBOX_IMAGE" ]; then
+    echo "containerd-conf-d: kubeadm wants sandbox image ${SANDBOX_IMAGE}"
+else
+    echo "containerd-conf-d: kubeadm could not name a pause image; falling back" >&2
+fi
+export SANDBOX_IMAGE
+
 python3 /tmp/containerd-to-mcapi-shape.py
 
 # Fail the build rather than ship a config containerd rejects at first boot.

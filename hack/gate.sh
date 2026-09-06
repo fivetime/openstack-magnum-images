@@ -235,9 +235,22 @@ done
 
 # --image-pull-policy=Never turns "the control-plane images really were
 # preloaded" into a hard assertion instead of a directory listing.
+#
+# The image to run is read out of the node's own containerd config rather than
+# named here. Hardcoding a pause tag ties the gate to one Kubernetes version -
+# the tag follows the version, so the same literal that passes for 1.37.0 is
+# absent on a 1.34.11 node - and it tests a different image from the one
+# containerd will actually use for sandboxes. Reading it makes the assertion
+# "the sandbox image this node is configured to use is present", for any
+# version.
+PAUSE=\$(awk -F'"' '/^[[:space:]]*sandbox_image[[:space:]]*=/{print \$2; exit}' \
+         /etc/containerd/config.toml)
+[ -n "\$PAUSE" ] || fail no-sandbox-image
+echo "gate: running the node's own sandbox image \${PAUSE}"
+
 # Retried: admission and the scheduler can both still be warming up.
 for i in \$(seq 1 12); do
-    kubectl run gate --image=registry.k8s.io/pause:3.10.2 --image-pull-policy=Never && break
+    kubectl run gate --image="\$PAUSE" --image-pull-policy=Never && break
     [ "\$i" = 12 ] && fail pod-create
     sleep 5
 done
