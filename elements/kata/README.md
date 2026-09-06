@@ -91,6 +91,45 @@ KVM_CREATE_VM fd = 4     # 真的在实例内部建出了一台 VM
 判据要选 `KVM_CREATE_VM` 而不是 `ls /dev/kvm`：设备节点存在只说明模块加载了，
 建得出 VM 才说明第三层真的能用。
 
+## ③ 但 QEMU 在第三层起不来 —— 实测结论
+
+2026-09-06 在一个真 Magnum 集群（`ubuntu-24.04-v1.37.0-amd64`，每个 handler 一个
+Pod，读 `/proc/version`）上的结果：
+
+| RuntimeClass | 结果 | `/proc/version` |
+|---|---|---|
+| 不写 | ✅ | `6.8.0-139-generic`（宿主内核，crun） |
+| `gvisor` | ✅ | `4.19.0-gvisor` |
+| `kata-clh` | ✅ | **`6.18.35` 真 guest 内核** |
+| `kata-clh-runtime-rs` | ✅ | `6.18.35` |
+| `kata-dragonball` | ✅ | `6.18.35` |
+| `kata-qemu` | ❌ | 起不来 |
+| `kata-qemu-runtime-rs` | ❌ | 起不来 |
+
+**别被 shim 报的错带偏。** 它报的是
+
+```
+vsock: failed to connect to Vsock { vsock_cid: …, port: 1024 } within 10s
+```
+
+看着像 vsock/vhost 的问题，但那只是症状。节点 journal 里 QEMU 自己的话才是真因：
+
+```
+qemu stderr: "error: kvm run failed Bad address"
+EIP=000f070e  CR0=00000011  EFER=0      ← 还在 SeaBIOS,实模式/保护模式早期
+```
+
+**VM 在固件阶段就死了，agent 根本没机会启动。** 10 次重试报错完全一致。
+
+关键在于 **cloud-hypervisor 和 Dragonball 直接引导内核、不过固件**，而 QEMU
+(`machine_type = "q35"`, `firmware = ""`) 要先跑 SeaBIOS。两个配置指向的**内核和
+根镜像是同一份**，文件都在 —— 所以这不是"嵌套虚拟化不可用"，**是 SeaBIOS 这条路径
+在第三层不可用**。
+
+因此 `magnum_cluster_api` 只自动创建 `gvisor` / `kata-clh` / `kata-dragonball`
+三个 RuntimeClass。**qemu 的 handler 仍然注册着** —— 换硬件、或者计算节点改用
+`cpu_mode=host-passthrough` 之后想再试，自己建一个 RuntimeClass 即可。
+
 换个环境要重新验，在一台节点 VM 里跑：
 
 ```bash
@@ -117,10 +156,11 @@ metadata:
 handler: kata-qemu
 ```
 
-`kata-dragonball`、`kata-qemu-runtime-rs`、`kata-clh-runtime-rs` 同理 ——
-**handler 在镜像里已经注册好了，只是没被自动创建成 RuntimeClass**，因为它们没在
-这批节点上验过。驱动那份清单只列验过的，理由是：RuntimeClass 在、handler 不在，
-Pod 会通过准入然后在建容器时挂，比直接被拒难查得多。
+`kata-qemu`、`kata-qemu-runtime-rs`、`kata-clh-runtime-rs` 同理 ——
+**handler 在镜像里已经注册好了，只是没被自动创建成 RuntimeClass**。
+驱动那份清单只列**实测能跑起 Pod 的**，理由是不对称：RuntimeClass 在、但那个
+runtime 起不来，Pod 会**通过准入然后在建容器时挂**，比直接被 Forbidden 拒掉
+难查得多。
 
 ## 构建期硬校验
 
