@@ -1,0 +1,11 @@
+# The kata release is published as .tar.zst, and the element unpacks it with
+# `tar --zstd` inside the chroot. ubuntu-minimal's chroot carries no zstd, and
+# tar reports that as
+#
+#     tar (child): zstd: Cannot exec: No such file or directory
+#
+# which is a build failure in install.d/76-kata with nothing about kata in it.
+# Declared here rather than installed by the script so it happens in
+# install.d/01-package-installs, long before 76-kata runs.
+curl:
+zstd:
