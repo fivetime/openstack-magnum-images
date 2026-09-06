@@ -55,11 +55,26 @@ on:
       elements:
         description: Extra diskimage-builder elements
         type: string
-        # crun replaces runc as what containerd executes (3.4 MiB); gvisor adds
-        # a runsc RuntimeClass (~50 MiB). kata is deliberately absent: it is
-        # ~2.5 GB unpacked and needs nested virtualisation the nodes do not
-        # have. Add it here when both are acceptable.
-        default: "node-tuning containerd-conf-d crun gvisor"
+        # The image carries every isolation level a tenant might ask for, so
+        # that choosing between them is a `runtimeClassName` in the tenant's
+        # own YAML rather than a different image and a different cluster:
+        #
+        #   crun     replaces runc as what containerd executes
+        #   gvisor   runsc, a userspace kernel; no /dev/kvm needed
+        #   kata     a real VM per pod, with QEMU and cloud-hypervisor
+        #
+        # A handler is all the image can carry. A RuntimeClass is a cluster
+        # object, so nothing schedules onto any of these until one exists
+        # naming the handler; magnum-cluster-api creates them per cluster
+        # (resources.py, NODE_IMAGE_RUNTIME_HANDLERS), and that list has to
+        # stay in step with this one - a RuntimeClass whose handler is missing
+        # on the node admits the pod and then fails it at container creation,
+        # which is far harder to diagnose than being refused up front.
+        #
+        # kata is what makes DIB_IMAGE_SIZE 8 rather than 3. That is store
+        # space in Glance, not boot cost: the images are raw and Glance's
+        # backend is RBD, so nodes CoW-clone them instead of copying.
+        default: "node-tuning containerd-conf-d crun gvisor kata"
       release:
         description: Publish the manifest and checksum to a GitHub Release
         type: boolean
@@ -202,14 +217,14 @@ jobs:
       # raw only: Glance can CoW-clone a raw image that sits in the RBD store,
       # while a qcow2 forces a full copy on every node boot - the cost this
       # pipeline exists to avoid. EXTRA_ELEMENTS carries the local additions;
-      # node-tuning is on by default, add gvisor for a runsc runtime handler.
+      # keep its default in step with the `elements` input above.
       - name: Build
         run: |
           uv run disk-image-create -t raw -o "${NAME}" \
             vm "${{ matrix.element }}" block-device-kubernetes kubernetes \
             ${EXTRA_ELEMENTS}
         env:
-          EXTRA_ELEMENTS: ${{ inputs.elements || vars.EXTRA_ELEMENTS || 'node-tuning containerd-conf-d crun gvisor' }}
+          EXTRA_ELEMENTS: ${{ inputs.elements || vars.EXTRA_ELEMENTS || 'node-tuning containerd-conf-d crun gvisor kata' }}
           ELEMENTS_PATH: ${{ github.workspace }}/elements
           DIB_RELEASE: ${{ matrix.release }}
           DIB_KUBERNETES_VERSION: ${{ matrix.k8s }}
@@ -225,11 +240,16 @@ jobs:
           DIB_MIN_TMPFS: "4"
           DIB_CLOUD_INIT_GROWPART_DEVICES: '["/"]'
           DIB_SKIP_BASE_PACKAGE_INSTALL: "1"
-          # 3 GB fits the default element set with about 800 MB spare.
-          # The kata element unpacks roughly 2.5 GB of VMMs and guest kernels
-          # on top of that, so enabling it without raising this fails the build
-          # on a full filesystem rather than on anything informative.
-          DIB_IMAGE_SIZE: ${{ vars.DIB_IMAGE_SIZE || '3' }}
+          # 8 GB, because the default element set now includes kata, which
+          # unpacks roughly 2.5 GB of VMMs, guest kernels and initrds on top of
+          # the ~2.5 GB everything else needs. Building the default set at 3
+          # fails on a full filesystem rather than on anything informative.
+          #
+          # Larger is close to free here and the reason is worth keeping: the
+          # image is raw and Glance stores it in RBD, so a node CoW-clones it.
+          # The flavour's root disk has to hold it, which magnum-medium's 40 GB
+          # does several times over.
+          DIB_IMAGE_SIZE: ${{ vars.DIB_IMAGE_SIZE || '8' }}
 
       # A build that finished is not a build that is correct. Read the claims
       # back out of the filesystem before anything downstream trusts them.

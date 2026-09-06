@@ -6,11 +6,12 @@
 # Runs at 75 so the containerd element's 70-containerd has already written
 # /etc/containerd/config.toml for this drop-in to sit beside.
 #
-# gVisor is a good fit for a Cluster API node image where Kata is not: runsc
+# Shipped alongside the kata element rather than instead of it: the tenant
+# chooses per pod with runtimeClassName, so the image carries every option.
+# What runsc adds to that set is a handler with no hardware prerequisite - it
 # is a static userspace binary with no kernel module, and the systrap platform
-# needs no /dev/kvm at all. A Magnum node is itself a guest on a compute node
-# that is often already a guest, so anything demanding another layer of
-# hardware virtualisation cannot be relied on.
+# needs no /dev/kvm at all, so it still works on a node where a Kata VM (a
+# third level of nesting here) cannot start.
 
 if [ ${DIB_DEBUG_TRACE:-1} -gt 0 ]; then
     set -x

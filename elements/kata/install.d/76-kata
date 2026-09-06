@@ -4,23 +4,27 @@
 # Install Kata Containers with its bundled VMMs and register the runtime
 # handlers in containerd.
 #
-# NOT ON BY DEFAULT, for two reasons that are worth knowing before enabling it:
+# ON BY DEFAULT. Two things about it are worth knowing.
 #
 # Size. kata-static is ~925 MiB compressed and roughly 2.5 GB unpacked - QEMU,
-# cloud-hypervisor, firecracker, guest kernels and initrds. The node image goes
-# from about 3.3 GB to 6-7 GB, DIB_IMAGE_SIZE has to be raised accordingly, and
-# every node CoW-clones the larger image whether or not it ever starts a Kata
-# pod.
+# cloud-hypervisor, firecracker, guest kernels and initrds. It is what makes
+# DIB_IMAGE_SIZE 8 rather than 3. That is store space, not boot cost: the image
+# is raw and Glance keeps it in RBD, so a node CoW-clones it rather than copying
+# it, and a node that never starts a Kata pod pays for the bytes it never
+# faults in. The flavour's root disk has to be larger than the image, which is
+# the one number to check before raising this further.
 #
 # Nested virtualisation. Every Kata runtime except the ptrace-free ones boots a
-# real VM, so the node needs /dev/kvm. A Magnum node is a guest on a compute
-# node that is itself frequently a guest, which makes a Kata VM a third level
-# of nesting - supported on paper, unusable in practice. Check before enabling:
+# real VM, so the node needs /dev/kvm - and a Magnum node is a guest on a
+# compute node that is itself a guest here, which makes a Kata VM a third level
+# of nesting. That is why this element was off for a long time. It is not a
+# theoretical objection, so check it rather than assume either answer:
 #
 #     grep -c vmx /proc/cpuinfo && ls -l /dev/kvm     # inside a node VM
 #
-# If that has no /dev/kvm, use the gvisor element instead: runsc needs no
-# hardware virtualisation at all.
+# Where /dev/kvm is absent, the gvisor handler in the same image still works:
+# runsc with the systrap platform needs no hardware virtualisation at all. That
+# is the reason to ship both rather than choose.
 
 if [ ${DIB_DEBUG_TRACE:-1} -gt 0 ]; then
     set -x
