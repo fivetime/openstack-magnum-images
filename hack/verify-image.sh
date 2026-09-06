@@ -154,11 +154,35 @@ if [[ -x "$MNT/usr/bin/runsc" ]] &&
     runsc_v=$(bin_version /usr/bin/runsc --version | awk '{print $3}' || true)
     log "gvisor runtime handler present"
 fi
+# kata 4.x ships only the Rust runtime in kata-static, so there is no
+# /opt/kata/bin/kata-runtime to ask any more - looking for it recorded no kata
+# version at all for an image that had five working kata handlers. The shim is
+# the thing that must exist for those handlers to work, so it is what is
+# checked.
+#
+# The version comes from the tarball name the element recorded at install time
+# rather than from the build variable, for the same reason as everything else
+# here: a build that installed something other than what it was asked for must
+# not be able to describe itself as correct. The shim's own --version is tried
+# first and the filename is the fallback.
 kata_v=""
-if [[ -x "$MNT/opt/kata/bin/kata-runtime" ]] &&
+kata_handlers=""
+if [[ -x "$MNT/opt/kata/runtime-rs/bin/containerd-shim-kata-v2" ]] &&
    grep -rq "runtimes.kata-" "$MNT/etc/containerd/conf.d/"; then
-    kata_v=$(bin_version /opt/kata/bin/kata-runtime --version | awk '{print $NF}' || true)
-    log "kata runtime handlers present"
+    kata_v=$(bin_version /opt/kata/runtime-rs/bin/containerd-shim-kata-v2 --version |
+             grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
+    if [[ -z "$kata_v" && -f "$MNT/etc/kata-static.sha256" ]]; then
+        kata_v=$(grep -oE 'kata-static-[0-9]+\.[0-9]+\.[0-9]+' "$MNT/etc/kata-static.sha256" |
+                 head -1 | sed 's/^kata-static-//' || true)
+    fi
+
+    # The handler names, not just "kata is here". magnum-cluster-api creates a
+    # RuntimeClass per handler and the two lists have to agree; recording what
+    # the image actually registered is what makes a disagreement visible.
+    kata_handlers=$(grep -rhoE 'runtimes\.(kata-[a-z0-9-]+)\]' \
+                    "$MNT/etc/containerd/conf.d/" |
+                    sed -E 's/^runtimes\.//; s/\]$//' | sort -u | paste -sd, - || true)
+    log "kata handlers present: ${kata_handlers:-none} (kata ${kata_v:-unknown})"
 fi
 
 jq -n \
@@ -171,6 +195,7 @@ jq -n \
     --arg crun_version "${crun_v#v}" \
     --arg runsc_version "$runsc_v" \
     --arg kata_version "${kata_v#v}" \
+    --arg kata_handlers "$kata_handlers" \
     --arg build_run_id "${GITHUB_RUN_ID:-}" \
     --arg source_commit "${GITHUB_SHA:-}" \
     --argjson images_preloaded "$images_preloaded" \
@@ -180,6 +205,7 @@ jq -n \
       containerd_version:$containerd_version, runc_version:$runc_version,
       crictl_version:$crictl_version, crun_version:$crun_version,
       runsc_version:$runsc_version, kata_version:$kata_version,
+      kata_handlers:$kata_handlers,
       build_run_id:$build_run_id,
       source_commit:$source_commit, images_preloaded:$images_preloaded,
       boot_verified:$boot_verified}

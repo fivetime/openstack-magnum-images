@@ -89,8 +89,12 @@ props=(
 )
 # Provenance and capability flags, straight from the manifest. Absent keys are
 # simply not published rather than guessed.
+# kata_handlers is the list of containerd handler names the image registered.
+# It is published because magnum-cluster-api creates a RuntimeClass per handler
+# from a list of its own, and this is the only place the two can be compared
+# without booting a node.
 for key in containerd_version runc_version cni_plugins_version crictl_version \
-           crun_version runsc_version kata_version \
+           crun_version runsc_version kata_version kata_handlers \
            build_run_id source_commit boot_verified images_preloaded; do
     value=$(m "$key")
     [[ -n "$value" ]] && props+=(--property "${key}=${value}")
