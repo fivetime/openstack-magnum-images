@@ -43,51 +43,65 @@ case "${ARCH}" in
     arm64) KATA_ARCH=arm64 ;;
     *) echo "kata: unsupported architecture ${ARCH}" >&2; exit 1 ;;
 esac
-DIB_KATA_URL=${DIB_KATA_URL:-"https://github.com/kata-containers/kata-containers/releases/download/${DIB_KATA_VERSION}/kata-static-${DIB_KATA_VERSION}-${KATA_ARCH}.tar.zst"}
+KATA_BASE=${DIB_KATA_BASE_URL:-"https://github.com/kata-containers/kata-containers/releases/download/${DIB_KATA_VERSION}"}
+
+# TWO TARBALLS, AND WHY BOTH
+#
+# 4.1.0 split the release. Up to and including 4.0.0 there was one 1.95 GB
+# kata-static carrying both runtimes; from 4.1.0:
+#
+#   kata-static-<v>-<arch>.tar.zst       ~969 MB   runtime-rs (Rust) only
+#   kata-go-static-<v>-<arch>.tar.zst   ~1219 MB   the Go runtime
+#
+# Both are installed. The Go runtime is deprecated upstream, which is a reason
+# not to build anything new on it - not a reason to leave it out, because
+# runtime-rs cannot currently start a QEMU sandbox here:
+#
+#     qemu stderr: "error: kvm run failed Bad address"
+#
+# and the shim reports only a vsock connect timeout. That is specific to how
+# runtime-rs launches QEMU: clh and Dragonball are runtime-rs too and boot a
+# real guest, kata's own qemu-system-x86_64 run by hand boots SeaBIOS fine at
+# the same nesting depth, and the Go runtime's kata-qemu works on other nodes
+# in this cloud. Shipping only runtime-rs would mean shipping an image whose
+# kata-qemu - the name every tutorial uses - does not work.
+#
+# They share 87 paths (kernels, guest images, VMMs), so together they are about
+# 3.8 GB unpacked rather than the 5.0 GB the two tarballs suggest. kata-static
+# is extracted first so the Go tarball's files win where they overlap, and so
+# that share/defaults/kata-containers/configuration.toml - a symlink to
+# configuration-qemu.toml that only the Go tarball contains - resolves.
 
 TMPDIR=$(mktemp -d)
 trap "rm -rf $TMPDIR" EXIT
-
 cd "${TMPDIR}"
-curl -fsSLO "${DIB_KATA_URL}"
-# The release publishes no checksum asset; record what was installed so the
-# manifest can carry it.
-sha256sum "kata-static-${DIB_KATA_VERSION}-${KATA_ARCH}.tar.zst" > /etc/kata-static.sha256
 
-# The tarball is rooted at /opt/kata.
-tar --zstd -xf "kata-static-${DIB_KATA_VERSION}-${KATA_ARCH}.tar.zst" -C /
+: >/etc/kata-static.sha256
+for t in "kata-static-${DIB_KATA_VERSION}-${KATA_ARCH}.tar.zst" \
+         "kata-go-static-${DIB_KATA_VERSION}-${KATA_ARCH}.tar.zst"; do
+    curl -fsSLO "${KATA_BASE}/${t}"
+    # The release publishes no checksum asset; record what was installed so the
+    # manifest can carry it.
+    sha256sum "$t" >>/etc/kata-static.sha256
+    # Both tarballs are rooted at ./opt/kata.
+    tar --zstd -xf "$t" -C /
+    rm -f "$t"
+done
 
-# WHAT IS ACTUALLY IN THIS TARBALL
-#
-# Kata 4.x split the release in two. kata-static carries the Rust runtime
-# (runtime-rs) only; the Go runtime moved to a separate kata-go-static tarball
-# that is another 1.2 GB. So this image has, and can only register, the
-# runtime-rs shim:
-#
-#     /opt/kata/runtime-rs/bin/containerd-shim-kata-v2   the only shim
-#     /opt/kata/bin/{qemu-system-*,cloud-hypervisor,openvmm}
-#     /opt/kata/share/defaults/kata-containers/runtime-rs/*.toml
-#
-# There is no kata-runtime, no kata-monitor, no firecracker and no jailer, and
-# share/defaults/kata-containers/configuration.toml is a symlink to a
-# configuration-qemu.toml that this tarball does not contain. An element
-# written for 3.x silently produced no configs at all and was caught only by
-# its own check at the end - which is why that check stays.
-#
-# The Go runtime is deprecated upstream; shipping 1.2 GB more to keep a
-# deprecated runtime alive is not a trade worth making. Its familiar handler
-# names are kept as aliases instead, below.
-SHIM=/opt/kata/runtime-rs/bin/containerd-shim-kata-v2
-[ -x "$SHIM" ] ||
-    { echo "kata: ${SHIM} is missing; the tarball layout has changed again" >&2; exit 1; }
+# Both shims must exist. Everything below registers handlers against one of
+# them, and a handler whose shim is missing is a pod that is admitted and then
+# fails at container creation - the failure mode this element exists to avoid.
+SHIM_GO=/opt/kata/bin/containerd-shim-kata-v2
+SHIM_RS=/opt/kata/runtime-rs/bin/containerd-shim-kata-v2
+for shim in "$SHIM_GO" "$SHIM_RS"; do
+    [ -x "$shim" ] ||
+        { echo "kata: ${shim} is missing; the tarball layout has changed" >&2; exit 1; }
+done
 
-# Anything containerd is told to run by path does not need to be on PATH, but
-# the shim being there makes `runtime_type` alone work and makes the node
-# debuggable by hand. The rest are linked when present, so a future tarball
-# that brings the Go tools back needs no change here.
-ln -sfn "$SHIM" /usr/local/bin/containerd-shim-kata-v2
+# Linked for a human debugging the node by hand; containerd is told the path.
 for b in cloud-hypervisor openvmm firecracker jailer kata-collect-data.sh \
-         kata-monitor kata-runtime qemu-system-x86_64 qemu-system-aarch64; do
+         kata-monitor kata-runtime containerd-shim-kata-v2 \
+         qemu-system-x86_64 qemu-system-aarch64; do
     [ -e "/opt/kata/bin/$b" ] && ln -sfn "/opt/kata/bin/$b" "/usr/local/bin/$b"
 done
 
@@ -95,47 +109,46 @@ done
 # at boot rather than here: this is a chroot with the build host's kernel.
 printf 'vhost_vsock\nvhost_net\n' > /etc/modules-load.d/kata.conf
 
-DEFAULTS=/opt/kata/share/defaults/kata-containers/runtime-rs
+DEFAULTS=/opt/kata/share/defaults/kata-containers
 install -d -m 755 /etc/kata-containers
-for c in configuration-qemu-runtime-rs.toml configuration-clh-runtime-rs.toml \
-         configuration-dragonball.toml; do
+for c in configuration-qemu.toml configuration-clh.toml configuration-fc.toml; do
     [ -f "${DEFAULTS}/$c" ] && cp "${DEFAULTS}/$c" "/etc/kata-containers/$c"
 done
+for c in configuration-qemu-runtime-rs.toml configuration-clh-runtime-rs.toml \
+         configuration-dragonball.toml; do
+    [ -f "${DEFAULTS}/runtime-rs/$c" ] && cp "${DEFAULTS}/runtime-rs/$c" "/etc/kata-containers/$c"
+done
 # Tools that read configuration.toml with no further argument get the QEMU one,
-# the same default upstream's own symlink points at.
-[ -f /etc/kata-containers/configuration-qemu-runtime-rs.toml ] &&
-    cp /etc/kata-containers/configuration-qemu-runtime-rs.toml \
-       /etc/kata-containers/configuration.toml
+# which is what upstream's own symlink points at.
+[ -f /etc/kata-containers/configuration-qemu.toml ] &&
+    cp /etc/kata-containers/configuration-qemu.toml /etc/kata-containers/configuration.toml
 
-# Register the handlers. privileged_without_host_devices is required: a
-# privileged Kata pod must not be handed the host's devices, because the
-# workload runs in a guest and those nodes mean nothing there.
+# Register the handlers, under exactly the names upstream's kata-deploy uses:
+# a bare name is the Go runtime, a -runtime-rs suffix is the Rust one. An
+# earlier version of this element shipped only runtime-rs and aliased kata-qemu
+# onto it, which put the familiar name on the one runtime that does not work.
 #
-# Five names for three runtimes. kata-qemu and kata-clh are aliases for the
-# runtime-rs entries, because those are the names every tutorial, every
-# RuntimeClass example and magnum-cluster-api's own list use, and a tenant who
-# writes the familiar name should get a pod rather than a Forbidden. Upstream
-# reserves those two names for the Go runtime; we do not ship it, so nothing
-# collides - and if the Go runtime is ever added here, it collides loudly in
-# this file rather than silently at runtime.
+# privileged_without_host_devices is required: a privileged Kata pod must not be
+# handed the host's devices, because the workload runs in a guest and those
+# nodes mean nothing there.
 #
-# A drop-in, not an append to config.toml: magnum-cluster-api replaces that
-# file at first boot and only conf.d survives. Version 2 schema to match the
-# template it writes.
+# A drop-in, not an append to config.toml: magnum-cluster-api replaces that file
+# at first boot and only conf.d survives. Version 2 schema to match the template
+# it writes.
 install -d -o root -g root -m 755 /etc/containerd/conf.d
 cat >/etc/containerd/conf.d/50-kata.toml <<CTR
 version = 2
 
-$(for pair in "kata-qemu:configuration-qemu-runtime-rs.toml" \
-              "kata-qemu-runtime-rs:configuration-qemu-runtime-rs.toml" \
-              "kata-clh:configuration-clh-runtime-rs.toml" \
-              "kata-clh-runtime-rs:configuration-clh-runtime-rs.toml" \
-              "kata-dragonball:configuration-dragonball.toml"; do
-    name=${pair%%:*}; conf=${pair#*:}
+$(for entry in "kata-qemu:${SHIM_GO}:configuration-qemu.toml" \
+               "kata-clh:${SHIM_GO}:configuration-clh.toml" \
+               "kata-qemu-runtime-rs:${SHIM_RS}:configuration-qemu-runtime-rs.toml" \
+               "kata-clh-runtime-rs:${SHIM_RS}:configuration-clh-runtime-rs.toml" \
+               "kata-dragonball:${SHIM_RS}:configuration-dragonball.toml"; do
+    name=${entry%%:*}; rest=${entry#*:}; shim=${rest%%:*}; conf=${rest#*:}
     cat <<ENTRY
 [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.${name}]
   runtime_type = 'io.containerd.kata.v2'
-  runtime_path = '${SHIM}'
+  runtime_path = '${shim}'
   privileged_without_host_devices = true
   pod_annotations = ['io.katacontainers.*']
   container_annotations = ['io.katacontainers.*']
@@ -153,11 +166,18 @@ CTR
 
 # Every registered handler must have the config file it points at, or the
 # failure surfaces as a pod that will not start rather than a build that did.
-for c in configuration-qemu-runtime-rs.toml configuration-clh-runtime-rs.toml \
-         configuration-dragonball.toml; do
-    [ -f "/etc/kata-containers/$c" ] ||
-        { echo "kata: registered a handler but /etc/kata-containers/$c is missing" >&2; exit 1; }
+# Read back out of the drop-in that was just written, so this checks what was
+# registered rather than a second list that can drift from it.
+# Collected first: a `while read` on the right of a pipe runs in a subshell,
+# where `exit 1` ends the subshell rather than this script.
+REGISTERED=$(sed -n "s|.*ConfigPath = '\(/etc/kata-containers/[^']*\)'.*|\1|p" \
+             /etc/containerd/conf.d/50-kata.toml | sort -u)
+for c in $REGISTERED; do
+    [ -f "$c" ] ||
+        { echo "kata: registered a handler but ${c} is missing" >&2; exit 1; }
 done
+echo "kata: registered handlers, all configs present:"
+sed -n 's|.*runtimes\.\(kata-[a-z0-9-]*\)\]$|  \1|p' /etc/containerd/conf.d/50-kata.toml
 
 # Fail the build rather than ship a config containerd rejects at first boot.
 containerd --config /etc/containerd/config.toml config dump >/dev/null

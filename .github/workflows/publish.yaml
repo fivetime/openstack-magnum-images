@@ -71,9 +71,11 @@ on:
         # on the node admits the pod and then fails it at container creation,
         # which is far harder to diagnose than being refused up front.
         #
-        # kata is what makes DIB_IMAGE_SIZE 8 rather than 3. That is store
-        # space in Glance, not boot cost: the images are raw and Glance's
-        # backend is RBD, so nodes CoW-clone them instead of copying.
+        # kata is what makes DIB_IMAGE_SIZE 12 rather than 3 - since 4.1.0 it
+        # is two tarballs, runtime-rs and the Go runtime, because runtime-rs
+        # cannot currently start a QEMU sandbox here. That is store space in
+        # Glance, not boot cost: the images are raw and Glance's backend is
+        # RBD, so nodes CoW-clone them instead of copying.
         default: "node-tuning containerd-conf-d crun gvisor kata"
       release:
         description: Publish the manifest and checksum to a GitHub Release
@@ -244,16 +246,17 @@ jobs:
           DIB_MIN_TMPFS: "4"
           DIB_CLOUD_INIT_GROWPART_DEVICES: '["/"]'
           DIB_SKIP_BASE_PACKAGE_INSTALL: "1"
-          # 8 GB, because the default element set now includes kata, which
-          # unpacks roughly 2.5 GB of VMMs, guest kernels and initrds on top of
-          # the ~2.5 GB everything else needs. Building the default set at 3
-          # fails on a full filesystem rather than on anything informative.
+          # 12 GB, because the default element set includes kata, and kata
+          # is two tarballs since 4.1.0 - runtime-rs and the Go runtime, about
+          # 3.8 GB together once the 87 paths they share are counted once.
+          # Building the default set at 3 fails on a full filesystem rather
+          # than on anything informative.
           #
           # Larger is close to free here and the reason is worth keeping: the
           # image is raw and Glance stores it in RBD, so a node CoW-clones it.
           # The flavour's root disk has to hold it, which magnum-medium's 40 GB
           # does several times over.
-          DIB_IMAGE_SIZE: ${{ vars.DIB_IMAGE_SIZE || '8' }}
+          DIB_IMAGE_SIZE: ${{ vars.DIB_IMAGE_SIZE || '12' }}
 
       # A build that finished is not a build that is correct. Read the claims
       # back out of the filesystem before anything downstream trusts them.
