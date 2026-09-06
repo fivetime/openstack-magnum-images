@@ -1,0 +1,75 @@
+#!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+#
+# Assert that the sandbox image containerd is configured to use is one of the
+# images kubeadm actually preloaded.
+#
+# These are chosen by different things - the preloaded set follows the
+# Kubernetes version through kubeadm, containerd's own default follows the
+# containerd version, and hack/versions.sh installs the newest containerd for
+# every Kubernetes version. When they disagree the node cannot start a single
+# pod without egress to registry.k8s.io, which on a real cluster looks like
+# kubeadm init timing out with a DNS error twenty minutes later.
+#
+# Runs at 81, immediately after the kubernetes element's 80-kubeadm-pull, so
+# the images are in the store and containerd can still be asked about them.
+#
+# Asking containerd is the point. The first version of this check grepped
+# /var/lib/containerd/.../meta.db for the reference instead, and bolt stores
+# its keys length-prefixed rather than NUL-terminated: the match ran into the
+# next record and read back "registry.k8s.io/pause:3.10.2M", failing a build
+# whose image was correct. Tag characters include letters, so no character
+# class fixes that. A structured source has no such ambiguity.
+
+if [ ${DIB_DEBUG_TRACE:-1} -gt 0 ]; then
+    set -x
+fi
+
+set -eu
+set -o pipefail
+
+# This element does not depend on the kubernetes element, and without it
+# nothing preloads anything - there is no claim to check. Only skip on that,
+# never on an empty image list: kubeadm present with no images pulled is the
+# failure, not the exemption.
+if [ ! -x /usr/bin/kubeadm ]; then
+    echo "sandbox-check: no kubeadm in this image; nothing preloads a sandbox image"
+    exit 0
+fi
+
+sandbox=$(awk -F'"' '/^[[:space:]]*sandbox_image[[:space:]]*=/{print $2; exit}' \
+          /etc/containerd/config.toml)
+[ -n "$sandbox" ] ||
+    { echo "sandbox-check: containerd config names no sandbox_image" >&2; exit 1; }
+
+# systemd is not running in the chroot, so containerd is started as a plain
+# binary. Its PID is kept rather than found again with pgrep: pgrep matches on
+# a pattern, and the only process that must be stopped here is the one this
+# script started.
+containerd --config /etc/containerd/config.toml &
+CTRD_PID=$!
+while [ ! -S /run/containerd/containerd.sock ]; do
+    kill -0 "$CTRD_PID" 2>/dev/null ||
+        { echo "sandbox-check: containerd exited before its socket appeared" >&2; exit 1; }
+    sleep 1
+done
+
+images=$(ctr -n k8s.io images ls -q) || images=""
+
+kill "$CTRD_PID"
+wait "$CTRD_PID" 2>/dev/null || true
+while [ -S /run/containerd/containerd.sock ]; do
+    sleep 1
+done
+
+# -x -F: whole line, literal. A substring match would pass on exactly the
+# mismatch this exists to catch, because "pause:3.10" is a prefix of
+# "pause:3.10.2".
+if printf '%s\n' "$images" | grep -qxF -- "$sandbox"; then
+    echo "sandbox-check: ${sandbox} is preloaded"
+else
+    echo "sandbox-check: containerd will ask for ${sandbox}, which was not preloaded." >&2
+    echo "sandbox-check: the images that are preloaded are:" >&2
+    printf '%s\n' "$images" | sed 's/^/  /' >&2
+    exit 1
+fi
