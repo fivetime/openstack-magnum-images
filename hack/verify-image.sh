@@ -183,6 +183,16 @@ if [[ -x "$MNT/opt/kata/runtime-rs/bin/containerd-shim-kata-v2" ]] &&
                     "$MNT/etc/containerd/conf.d/" |
                     sed -E 's/^runtimes\.//; s/\]$//' | sort -u | paste -sd, - || true)
     log "kata handlers present: ${kata_handlers:-none} (kata ${kata_v:-unknown})"
+
+    # kata backs guest memory with a file on /dev/shm, and systemd's default
+    # for it is half of RAM - smaller than the 2048 MB guest kata asks for on
+    # any node with 4 GB. The guest then faults in firmware with "kvm run
+    # failed Bad address", which the shim reports as a vsock timeout. Checked
+    # here because the element writing the fstab line and the image shipping it
+    # are two different things.
+    grep -qE '^[^#]*[[:space:]]/dev/shm[[:space:]]' "$MNT/etc/fstab" ||
+        die "kata is installed but /etc/fstab does not size /dev/shm; every QEMU sandbox would fail"
+    log "/dev/shm sized for kata: $(grep -E '^[^#]*[[:space:]]/dev/shm[[:space:]]' "$MNT/etc/fstab")"
 fi
 
 jq -n \

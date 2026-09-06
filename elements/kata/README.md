@@ -92,65 +92,67 @@ KVM_CREATE_VM fd = 4     # 真的在实例内部建出了一台 VM
 判据要选 `KVM_CREATE_VM` 而不是 `ls /dev/kvm`：设备节点存在只说明模块加载了，
 建得出 VM 才说明第三层真的能用。
 
-## ③ runtime-rs 的 QEMU 起不来 —— 和嵌套无关
+## ③ `/dev/shm` 必须大于客户机内存 —— 否则每个 QEMU 沙箱都起不来
 
-2026-09-06 在一个真 Magnum 集群（`ubuntu-24.04-v1.37.0-amd64`，每个 handler 一个
-Pod，读 `/proc/version`）：
+kata 把客户机内存放在 `/dev/shm` 的一个文件里（virtio-fs 要求这个映射是共享的）：
+
+```
+-m 2048M,slots=10,maxmem=...
+-object memory-backend-file,id=dimm1,size=2048M,mem-path=/dev/shm,share=on
+-numa node,memdev=dimm1
+```
+
+**systemd 给 `/dev/shm` 的默认值是内存的一半，而 kata 的 `default_memory` 是固定
+2048 MB。** 4 GB 的节点（`magnum-medium`）上就是 **1955 MB 的 shm 装 2048 MB 的客户机**
+—— 映射铺不满，客户机第一次碰到没有后备页的地址就是
+
+```
+error: kvm run failed Bad address
+EIP=000f070e  CR0=00000011  EFER=0
+```
+
+**而 shim 报出来的是 `vsock ... within 10s`**，看着像 `vhost_vsock` 的问题。它不是。
+真因永远在节点 journal 里 QEMU 自己那几行，见 `journalctl -t kata`。
+
+cloud-hypervisor 和 Dragonball **不把客户机内存放在 `/dev/shm`**，所以不受影响 ——
+这就是为什么一台节点可以 `kata-clh` 正常、每个 `kata-qemu` 都失败，也是为什么这个
+现象长期被误判成"QEMU 的问题"或"三层嵌套的问题"。**两者都不是。**
+
+元素因此往 `/etc/fstab` 写一行：
+
+```
+tmpfs /dev/shm tmpfs rw,nosuid,nodev,inode64,size=75% 0 0
+```
+
+用 fstab 而不是 unit 文件，是因为 systemd 自己挂 `/dev/shm`、没有可覆盖的 unit，
+而 `systemd-fstab-generator` 会替我们生成一个。tmpfs 只按实际使用的页计费，
+所以把上限从 50% 提到 75% 在用起来之前不花任何代价。
+
+### 实测矩阵（修好 shm 之后）
 
 | RuntimeClass | 结果 | `/proc/version` |
 |---|---|---|
 | 不写 | ✅ | `6.8.0-139-generic`（宿主内核，crun） |
 | `gvisor` | ✅ | `4.19.0-gvisor` |
-| `kata-clh` / `kata-clh-runtime-rs` | ✅ | **`6.18.35` 真 guest 内核** |
+| `kata-qemu`（Go） | ✅ | `6.18.35` |
+| `kata-clh`（Go） | ✅ | `6.18.35` |
+| `kata-clh-runtime-rs` | ✅ | `6.18.35` |
 | `kata-dragonball` | ✅ | `6.18.35` |
-| `kata-qemu` / `kata-qemu-runtime-rs`（均为 runtime-rs） | ❌ | 起不来 |
+| `kata-qemu-runtime-rs` | ❌ | 仍然起不来 |
 
-**别被 shim 报的错带偏。** 它报的是
+**只剩 runtime-rs 的 QEMU 一个**，而且它的失败日志里已经没有 `kvm run failed` 了 ——
+是 runtime-rs 自己的另一个问题，和 shm、和嵌套都无关。这也是**必须装
+`kata-go-static` 的实证理由**：不装它，`kata-qemu` 这个名字就只能落在唯一不能用的
+运行时上。
 
-```
-vsock: failed to connect to Vsock { vsock_cid: …, port: 1024 } within 10s
-```
+### 曾经据此得出的两个结论都是错的，留在这里免得重踩
 
-那只是症状。节点 journal 里 QEMU 自己的话才是真因：
-
-```
-qemu stderr: "error: kvm run failed Bad address"
-EIP=000f070e  CR0=00000011  EFER=0      ← 还在 SeaBIOS,实模式/保护模式早期
-```
-
-### 曾经据此得出的结论是错的
-
-看到"死在 SeaBIOS"，很自然会推成"固件路径在三层嵌套下不可用"。**做了对照实验，
-这个结论站不住**：把 kata 自带的 `/opt/kata/bin/qemu-system-x86_64`（11.0.1）
-直接拿来起一台空 VM ——
-
-```bash
-/opt/kata/bin/qemu-system-x86_64 -L /opt/kata/share/kata-qemu/qemu   -machine q35,accel=kvm -m 256 -nographic -no-reboot -net none
-```
-
-在**第三层**（Magnum 节点里）和**第二层**（一台只隔一层的 KVM 客户机里）
-**都正常跑到 SeaBIOS 的 "No bootable device"**。同一个二进制、同一条命令、
-只有深度不同。
-
-所以：**嵌套深度不是原因，SeaBIOS 不是原因，QEMU 版本也不是原因**，
-问题在 **kata 4.1.0 的 runtime-rs 怎么配置和拉起 QEMU** 这一段。
-`clh` 和 `dragonball` 同样走 runtime-rs 却没事，所以也不是 runtime-rs 整体坏掉。
-
-### 反证:同环境下 Go 运行时的 kata-qemu 是能用的
-
-同一批物理机上另有三台节点跑着 kata 的 **Go** 运行时（`/opt/kata/bin/containerd-shim-kata-v2`
-+ `configuration-qemu.toml`），`kata-qemu` 一直正常。这条既是 runtime-rs 有问题的
-反证，也是**下面把 `kata-go-static` 一起装进来**的理由。
-
-换个环境要重新验，在一台节点 VM 里跑：
-
-```bash
-grep -c vmx /proc/cpuinfo     # 0 = 宿主没把 vmx 透传进来
-ls -l /dev/kvm                # 不存在 = Kata 起不来
-```
-
-没有 `/dev/kvm` 也不用换镜像：同一张镜像里的 `gvisor` 照常能用 —— `runsc` 的
-systrap 平台是纯用户态，不需要任何硬件虚拟化。**同时带两个就是为了这个。**
+1. **"固件路径在三层嵌套下不可用"** —— 不成立。把 kata 自带的
+   `/opt/kata/bin/qemu-system-x86_64` 直接拿来起空 VM（`-machine q35,accel=kvm`，
+   加 `-cpu host`、加 `nvdimm=on` 都试过），在第三层和第二层**都正常跑到 SeaBIOS 的
+   "No bootable device"**。
+2. **"runtime-rs 起不了 QEMU,所以要装 Go"** —— 理由是错的（结论侥幸对）。当时
+   Go 那条路**同样是坏的**，只是我用 `ctr` 测的那次绕开了共享内存后端。真因是 shm。
 
 ## 集群里怎么用
 
