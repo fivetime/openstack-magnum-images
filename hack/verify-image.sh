@@ -193,6 +193,17 @@ if [[ -x "$MNT/opt/kata/runtime-rs/bin/containerd-shim-kata-v2" ]] &&
     grep -qE '^[^#]*[[:space:]]/dev/shm[[:space:]]' "$MNT/etc/fstab" ||
         die "kata is installed but /etc/fstab does not size /dev/shm; every QEMU sandbox would fail"
     log "/dev/shm sized for kata: $(grep -E '^[^#]*[[:space:]]/dev/shm[[:space:]]' "$MNT/etc/fstab")"
+
+    # Sizing it is only half. A container's own 64 MiB /dev/shm propagates back
+    # into the host namespace and is mounted over the host's, so what QEMU
+    # resolves is the container's - and the fstab size applies to the mount
+    # underneath it. A node with only the fstab line still fails every
+    # kata-qemu sandbox, which is how this was found.
+    [[ -f "$MNT/etc/systemd/system/kata-shm-private.service" ]] ||
+        die "kata is installed but kata-shm-private.service is missing; a container's /dev/shm would shadow the host's"
+    [[ -L "$MNT/etc/systemd/system/sysinit.target.wants/kata-shm-private.service" ]] ||
+        die "kata-shm-private.service is present but not enabled; it would never run"
+    log "/dev/shm kept private at boot: kata-shm-private.service enabled"
 fi
 
 jq -n \

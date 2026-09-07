@@ -1,0 +1,31 @@
+[Unit]
+# Keep container /dev/shm mounts out of the host's mount namespace.
+#
+# systemd mounts /dev/shm shared, because everything under / is rshared. A
+# container's own /dev/shm - 64 MiB, created by the CRI for any pod that is not
+# hostIPC - then propagates back into the host namespace and is mounted *over*
+# the host's, so every process that resolves /dev/shm afterwards gets 64 MiB.
+# Observed here from a privileged CSI node plugin: the same tmpfs superblock
+# appeared as that container's /dev/shm and as PID 1's.
+#
+# kata gives QEMU the guest's RAM as a file on /dev/shm, so on a shadowed node
+# a 2048 MB guest cannot be backed and QEMU faults in firmware with "kvm run
+# failed Bad address" - reported by the shim only as a vsock timeout. Sizing
+# /dev/shm in fstab is not enough on its own: that sizes the mount underneath,
+# which is exactly the one being shadowed.
+#
+# Making it private is the narrower fix than raising the size, and the correct
+# one: a container's /dev/shm has no business being visible on the host.
+Description=Keep /dev/shm private so container shm cannot shadow it
+DefaultDependencies=no
+After=local-fs.target
+Before=containerd.service kubelet.service sysinit.target
+ConditionPathIsMountPoint=/dev/shm
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/mount --make-private /dev/shm
+
+[Install]
+WantedBy=sysinit.target

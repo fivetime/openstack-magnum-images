@@ -54,3 +54,18 @@ if ! grep -qE '^[^#]*[[:space:]]/dev/shm[[:space:]]' /etc/fstab 2>/dev/null; the
 fi
 grep -E '^[^#]*[[:space:]]/dev/shm[[:space:]]' /etc/fstab ||
     { echo "kata: could not set the /dev/shm size; QEMU guests will not boot" >&2; exit 1; }
+
+# Enable the unit that keeps /dev/shm private. systemctl enable is unreliable in
+# a chroot with no running systemd, so the wants symlink is made directly - the
+# same thing enable would have done.
+#
+# Both halves are needed and neither is sufficient. The fstab line sizes the
+# tmpfs; the unit stops a container's 64 MiB /dev/shm from being mounted over it
+# and becoming what every later process resolves. A node with only the fstab
+# line still fails every kata-qemu sandbox, which is how this was found.
+install -d -m 755 /etc/systemd/system/sysinit.target.wants
+ln -sfn /etc/systemd/system/kata-shm-private.service \
+        /etc/systemd/system/sysinit.target.wants/kata-shm-private.service
+[ -L /etc/systemd/system/sysinit.target.wants/kata-shm-private.service ] ||
+    { echo "kata: could not enable kata-shm-private.service" >&2; exit 1; }
+echo "kata: /dev/shm will be sized and kept private at boot"
