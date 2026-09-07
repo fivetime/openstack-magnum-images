@@ -1,0 +1,56 @@
+#!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+#
+
+if [ ${DIB_DEBUG_TRACE:-1} -gt 0 ]; then
+    set -x
+fi
+
+set -eu
+set -o pipefail
+
+# /dev/shm has to be bigger than the guest, or QEMU cannot back its memory
+#
+# kata runs QEMU with the guest's RAM in a file on /dev/shm, because virtio-fs
+# needs the mapping shared:
+#
+#     -m 2048M,slots=10,maxmem=...
+#     -object memory-backend-file,id=dimm1,size=2048M,mem-path=/dev/shm,share=on
+#     -numa node,memdev=dimm1
+#
+# systemd's default for /dev/shm is half of RAM, and kata's default_memory is a
+# fixed 2048 MB. On a 4 GB node that is 1955 MB of shm for a 2048 MB guest: the
+# mapping cannot be fully backed, and the first guest access to an unbacked page
+# comes back as
+#
+#     error: kvm run failed Bad address
+#
+# with a register dump from early firmware. The shim reports only what it sees,
+# a vsock connect timeout, which reads like a vhost_vsock problem and is not.
+#
+# cloud-hypervisor and Dragonball are unaffected - they do not put guest memory
+# in /dev/shm - which is why a node can run kata-clh and fail every kata-qemu,
+# and why this looked like a QEMU or a nesting problem for a long time.
+#
+# In finalise.d, not install.d. diskimage-builder writes /etc/fstab itself
+# from the block-device layout, wholesale, after post-install.d and before
+# finalise.d:
+#
+#     INFO blockdevice [-] Creating fstab
+#     Calling [sudo cp .../states/block-device/fstab .../built/etc/fstab]
+#
+# so a line added any earlier is written and then thrown away. That is not a
+# theoretical ordering worry: it happened, the build passed every step that
+# ran before it, and only verify-image.sh reading the finished filesystem
+# caught it.
+#
+# 75%: enough headroom for the 2048 MB default on the smallest flavour that can
+# host it, and tmpfs is only backed by the pages actually touched, so raising
+# the cap costs nothing until something uses it. fstab rather than a unit file
+# because systemd mounts /dev/shm itself with no unit to override -
+# systemd-fstab-generator then makes one.
+if ! grep -qE '^[^#]*[[:space:]]/dev/shm[[:space:]]' /etc/fstab 2>/dev/null; then
+    printf 'tmpfs /dev/shm tmpfs rw,nosuid,nodev,inode64,size=75%% 0 0\n' >>/etc/fstab
+fi
+grep -E '^[^#]*[[:space:]]/dev/shm[[:space:]]' /etc/fstab ||
+    { echo "kata: could not set the /dev/shm size; QEMU guests will not boot" >&2; exit 1; }
