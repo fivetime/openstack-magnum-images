@@ -128,7 +128,7 @@ tmpfs /dev/shm tmpfs rw,nosuid,nodev,inode64,size=75% 0 0
 而 `systemd-fstab-generator` 会替我们生成一个。tmpfs 只按实际使用的页计费，
 所以把上限从 50% 提到 75% 在用起来之前不花任何代价。
 
-### 实测矩阵（修好 shm 之后）
+### 实测矩阵（两半都修好之后，全新集群、未手工改动、跑两遍）
 
 | RuntimeClass | 结果 | `/proc/version` |
 |---|---|---|
@@ -136,23 +136,26 @@ tmpfs /dev/shm tmpfs rw,nosuid,nodev,inode64,size=75% 0 0
 | `gvisor` | ✅ | `4.19.0-gvisor` |
 | `kata-qemu`（Go） | ✅ | `6.18.35` |
 | `kata-clh`（Go） | ✅ | `6.18.35` |
+| `kata-qemu-runtime-rs` | ✅ | `6.18.35` |
 | `kata-clh-runtime-rs` | ✅ | `6.18.35` |
 | `kata-dragonball` | ✅ | `6.18.35` |
-| `kata-qemu-runtime-rs` | ❌ | 仍然起不来 |
 
-**只剩 runtime-rs 的 QEMU 一个**，而且它的失败日志里已经没有 `kvm run failed` 了 ——
-是 runtime-rs 自己的另一个问题，和 shm、和嵌套都无关。这也是**必须装
-`kata-go-static` 的实证理由**：不装它，`kata-qemu` 这个名字就只能落在唯一不能用的
-运行时上。
+**六个 handler 全可用**，`magnum_cluster_api` 的 `NODE_IMAGE_RUNTIME_HANDLERS`
+也是这六个。
 
-### 曾经据此得出的两个结论都是错的，留在这里免得重踩
+### 沿途被证伪的三个结论，留在这里免得重踩
 
-1. **"固件路径在三层嵌套下不可用"** —— 不成立。把 kata 自带的
-   `/opt/kata/bin/qemu-system-x86_64` 直接拿来起空 VM（`-machine q35,accel=kvm`，
-   加 `-cpu host`、加 `nvdimm=on` 都试过），在第三层和第二层**都正常跑到 SeaBIOS 的
-   "No bootable device"**。
-2. **"runtime-rs 起不了 QEMU,所以要装 Go"** —— 理由是错的（结论侥幸对）。当时
-   Go 那条路**同样是坏的**，只是我用 `ctr` 测的那次绕开了共享内存后端。真因是 shm。
+1. **"固件路径在三层嵌套下不可用"** —— 错。把 kata 自带的
+   `/opt/kata/bin/qemu-system-x86_64` 直接拿来起空 VM（加 `-cpu host`、
+   加 `nvdimm=on` 都试过），在 L2 和 L3 **都正常跑到 SeaBIOS 的 "No bootable device"**。
+2. **"runtime-rs 起不了 QEMU"** —— 错。它和 Go 那条路挂在同一个原因上。中间那次
+   "Go 能起、rs 不能起"的对照是在**被 remount 撑大的那条容器 shm** 上做的，
+   不是在"影子挂载已经消失"的节点上做的，所以不成立。
+3. **"把 `/dev/shm` 调大就行"** —— 只对一半。调大的是**被盖住的那一条**。
+
+共同的教训:**每次都是拿单一现象去归因某个组件，而真正变化的是节点。**
+判据要落到"被测进程自己看到的是什么"——
+`/proc/<qemu-pid>/mountinfo` 那两行才是把这件事定死的证据。
 
 ## 集群里怎么用
 
