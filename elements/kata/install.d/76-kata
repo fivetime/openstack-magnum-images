@@ -171,10 +171,23 @@ ENTRY
     done
 } >/etc/containerd/conf.d/50-kata.toml
 
-# kata-fc (firecracker) is deliberately not registered, and in 4.x it could not
-# be: the binary is not in this tarball at all. It also requires the devmapper
-# snapshotter, which needs an LVM thin pool on a real block device - something
-# an image cannot create, because it depends on the node's disks.
+# kata-fc (firecracker) is deliberately not registered, though everything it
+# needs from an image is here: kata-go-static brings /opt/kata/bin/firecracker
+# and jailer, configuration-fc.toml is copied above, dm_thin_pool loads, and the
+# devmapper snapshotter is not disabled on a running node.
+#
+# Two things stop it, and neither is fixable here. It needs a devmapper thin
+# pool, which needs a block device the image cannot provide - a Magnum node has
+# one root disk and nothing spare, and a loop-backed pool is a configuration
+# containerd's own documentation limits to testing. And firecracker has no
+# shared filesystem at all: neither fc config carries a shared_fs key, because
+# there is no vhost-user-fs and no 9p, so a pod's configMap, secret, hostPath
+# and emptyDir mounts have no way in.
+#
+# kata-clh already gives a real VM with virtio-fs on these nodes, so what
+# firecracker would add - faster boot, the jailer - does not pay for those two.
+# Registering it is a drop-in for anyone who has set up devmapper and accepts
+# the volume limits.
 
 # Every registered handler must have the config file it points at, or the
 # failure surfaces as a pod that will not start rather than a build that did.

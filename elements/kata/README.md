@@ -50,9 +50,22 @@ Rust 运行时。
 > 早先有一版元素只装 runtime-rs，把 `kata-qemu` **别名**到 Rust shim 上 ——
 > 结果是把最熟悉的那个名字挂在**唯一不能用的运行时**上。别再这么做。
 
-**`kata-fc`（firecracker）没有注册**：它要 `devmapper` snapshotter，而 devmapper
-需要真实块设备上的 LVM thin pool，镜像做不到（依赖节点的磁盘）。二进制和
-`configuration-fc.toml` 都在，节点自己配好 devmapper 后用 drop-in 补上即可。
+**`kata-fc`（firecracker）没有注册**，但**镜像该给的都给了** ——
+`kata-go-static` 带了 `/opt/kata/bin/firecracker` 和 `jailer`，
+`configuration-fc.toml` 已铺到 `/etc/kata-containers/`，节点上 `dm_thin_pool`
+能加载，containerd 也没禁 devmapper snapshotter。
+
+不注册是因为两件镜像解决不了的事：
+
+1. **要 devmapper thin pool。** Magnum 节点只有一块根盘、没有富余块设备；
+   loop 文件撑的 thin pool 是 containerd 官方文档**明说仅供测试**的配置。
+2. **firecracker 没有任何共享文件系统。** 两份 fc 配置里**根本没有 `shared_fs` 这个键**
+   —— 没有 vhost-user-fs 也没有 9p，于是 Pod 的 configMap / secret / hostPath /
+   emptyDir **没有路径进得去**。
+
+而 `kata-clh` 在这些节点上已经能跑真 VM 且有 virtio-fs。firecracker 换来的
+（启动更快、jailer）抵不过上面两条。**谁配好了 devmapper 并接受卷的限制，
+自己下一个 drop-in 就能注册。**
 
 ## ① 体积 —— `DIB_IMAGE_SIZE` 必须是 12
 
