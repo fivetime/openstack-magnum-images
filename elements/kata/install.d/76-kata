@@ -128,6 +128,14 @@ done
 # earlier version of this element shipped only runtime-rs and aliased kata-qemu
 # onto it, which put the familiar name on the one runtime that does not work.
 #
+# The set is derived from the configs that are actually there, not fixed. The
+# tarballs differ by architecture: arm64 ships no
+# configuration-clh-runtime-rs.toml, though it does ship the cloud-hypervisor
+# binary, so a fixed list of five registered a handler whose config did not
+# exist and the check below failed every arm64 build. Deriving it means each
+# image registers what it can actually run, and the manifest records which -
+# see kata_handlers in hack/verify-image.sh.
+#
 # privileged_without_host_devices is required: a privileged Kata pod must not be
 # handed the host's devices, because the workload runs in a guest and those
 # nodes mean nothing there.
@@ -136,16 +144,20 @@ done
 # at first boot and only conf.d survives. Version 2 schema to match the template
 # it writes.
 install -d -o root -g root -m 755 /etc/containerd/conf.d
-cat >/etc/containerd/conf.d/50-kata.toml <<CTR
-version = 2
-
-$(for entry in "kata-qemu:${SHIM_GO}:configuration-qemu.toml" \
-               "kata-clh:${SHIM_GO}:configuration-clh.toml" \
-               "kata-qemu-runtime-rs:${SHIM_RS}:configuration-qemu-runtime-rs.toml" \
-               "kata-clh-runtime-rs:${SHIM_RS}:configuration-clh-runtime-rs.toml" \
-               "kata-dragonball:${SHIM_RS}:configuration-dragonball.toml"; do
-    name=${entry%%:*}; rest=${entry#*:}; shim=${rest%%:*}; conf=${rest#*:}
-    cat <<ENTRY
+{
+    echo "version = 2"
+    echo
+    for entry in "kata-qemu:${SHIM_GO}:configuration-qemu.toml" \
+                 "kata-clh:${SHIM_GO}:configuration-clh.toml" \
+                 "kata-qemu-runtime-rs:${SHIM_RS}:configuration-qemu-runtime-rs.toml" \
+                 "kata-clh-runtime-rs:${SHIM_RS}:configuration-clh-runtime-rs.toml" \
+                 "kata-dragonball:${SHIM_RS}:configuration-dragonball.toml"; do
+        name=${entry%%:*}; rest=${entry#*:}; shim=${rest%%:*}; conf=${rest#*:}
+        if [ ! -f "/etc/kata-containers/${conf}" ]; then
+            echo "kata: no ${conf} on ${ARCH}; not registering ${name}" >&2
+            continue
+        fi
+        cat <<ENTRY
 [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.${name}]
   runtime_type = 'io.containerd.kata.v2'
   runtime_path = '${shim}'
@@ -156,8 +168,8 @@ $(for entry in "kata-qemu:${SHIM_GO}:configuration-qemu.toml" \
     ConfigPath = '/etc/kata-containers/${conf}'
 
 ENTRY
-done)
-CTR
+    done
+} >/etc/containerd/conf.d/50-kata.toml
 
 # kata-fc (firecracker) is deliberately not registered, and in 4.x it could not
 # be: the binary is not in this tarball at all. It also requires the devmapper
@@ -168,14 +180,12 @@ CTR
 # failure surfaces as a pod that will not start rather than a build that did.
 # Read back out of the drop-in that was just written, so this checks what was
 # registered rather than a second list that can drift from it.
-# Collected first: a `while read` on the right of a pipe runs in a subshell,
-# where `exit 1` ends the subshell rather than this script.
-REGISTERED=$(sed -n "s|.*ConfigPath = '\(/etc/kata-containers/[^']*\)'.*|\1|p" \
-             /etc/containerd/conf.d/50-kata.toml | sort -u)
-for c in $REGISTERED; do
-    [ -f "$c" ] ||
-        { echo "kata: registered a handler but ${c} is missing" >&2; exit 1; }
-done
+# The configs are now what the list is built from, so "registered but missing"
+# cannot happen. What can is a tarball that stops shipping the QEMU config
+# entirely - the baseline every tutorial and magnum-cluster-api name - which
+# would leave an image quietly short of the runtime people ask for by name.
+grep -q 'runtimes\.kata-qemu\]' /etc/containerd/conf.d/50-kata.toml ||
+    { echo "kata: no kata-qemu handler registered; the tarball layout has changed" >&2; exit 1; }
 echo "kata: registered handlers, all configs present:"
 sed -n 's|.*runtimes\.\(kata-[a-z0-9-]*\)\]$|  \1|p' /etc/containerd/conf.d/50-kata.toml
 
