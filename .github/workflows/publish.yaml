@@ -92,7 +92,71 @@ on:
 permissions: {}
 
 jobs:
+  # What has been built is recorded on GitHub; where the image actually lives
+  # is Glance. Those two can disagree - delete an image from Glance and the
+  # release still says it was built, so discover skips it and nothing ever
+  # rebuilds it. The hole is silent and permanent.
+  #
+  # Reconciling them needs both, and no one runner has both cheaply: the
+  # GitHub-hosted runner has gh and no route to the OpenStack API, the
+  # self-hosted one has the route. So each answers where it is at home - this
+  # job lists Glance, discover reads the list.
+  #
+  # The list is advisory, and deliberately one-directional: it can only turn a
+  # skip into a build, never the reverse. An empty answer - Glance down, the
+  # client missing, this job skipped entirely - leaves discover exactly as it
+  # was, because a Glance outage must not rebuild the whole matrix.
+  inventory:
+    if: >-
+      vars.BUILD_RUNNER != '' &&
+      (inputs.glance == true || vars.GLANCE_ENABLED == 'true')
+    runs-on: ${{ vars.BUILD_RUNNER }}
+    permissions: {}
+    outputs:
+      names: ${{ steps.list.outputs.names }}
+    steps:
+      # Same reason as in the build job: the public endpoints are names this
+      # runner may not resolve, and an IP alone would match no HTTPRoute.
+      - name: Point the OpenStack public names at the gateway
+        if: vars.OS_GATEWAY_VIP != ''
+        run: |
+          for ip in ${{ vars.OS_GATEWAY_VIP }}; do
+              echo "${ip} keystone.openstack.svc.cluster.local keystone.openstack keystone glance.openstack.svc.cluster.local glance.openstack glance" |
+                sudo tee -a /etc/hosts
+          done
+
+      - name: Install the OpenStack client
+        run: |
+          python3 -m venv "$RUNNER_TEMP/osc"
+          "$RUNNER_TEMP/osc/bin/pip" -q install python-openstackclient
+          echo "$RUNNER_TEMP/osc/bin" >> "$GITHUB_PATH"
+
+      # Only node images, matched on the name this pipeline gives them, so an
+      # unrelated image can never be mistaken for one of ours. A failure here
+      # is not fatal: it emits nothing, and discover falls back to the record.
+      - id: list
+        run: |
+          names=$(openstack image list --status active -f value -c Name 2>/dev/null |
+                  grep -E '^[a-z0-9]+-[0-9.]+-v[0-9]+\.[0-9]+\.[0-9]+-(amd64|arm64)$' |
+                  sort | tr '\n' ' ') || true
+          echo "glance node images: $(echo $names | wc -w)"
+          echo "names=${names}" >> "$GITHUB_OUTPUT"
+        env:
+          OS_AUTH_URL: ${{ secrets.OS_AUTH_URL }}
+          OS_PROJECT_NAME: ${{ secrets.OS_PROJECT_NAME }}
+          OS_PROJECT_DOMAIN_NAME: ${{ secrets.OS_PROJECT_DOMAIN_NAME }}
+          OS_USERNAME: ${{ secrets.OS_USERNAME }}
+          OS_USER_DOMAIN_NAME: ${{ secrets.OS_USER_DOMAIN_NAME }}
+          OS_PASSWORD: ${{ secrets.OS_PASSWORD }}
+          OS_REGION_NAME: ${{ secrets.OS_REGION_NAME }}
+          OS_IDENTITY_API_VERSION: "3"
+          OS_INTERFACE: ${{ vars.OS_INTERFACE || 'public' }}
+
   discover:
+    needs: [inventory]
+    # inventory is skipped when there is no in-datacenter runner or the Glance
+    # half is off, and may fail when Glance is unwell. Neither stops discovery.
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -110,6 +174,7 @@ jobs:
           OS_LIST: ${{ inputs.os }}
           ARCH_LIST: ${{ inputs.arch }}
           RUNNER_AMD64: ${{ vars.BUILD_RUNNER || 'ubuntu-24.04' }}
+          GLANCE_NAMES: ${{ needs.inventory.outputs.names }}
 
   # Build, upload to Glance and boot the result, all on one runner, because
   # moving the image between runners costs more than everything else here.

@@ -118,6 +118,35 @@ load_published() {
     log "already built (total distinct assets): ${#PUBLISHED[@]}"
 }
 
+# The Glance half of the same question, supplied by the `inventory` job as a
+# space-separated list of image names. It cannot be asked here: discover runs
+# on a GitHub-hosted runner, which has no route to the OpenStack API.
+#
+# This exists because the record and the artifact can drift apart. A release
+# asset says "this was built once"; it does not say the image is still in
+# Glance. Delete one out of band and the record still reads published, so the
+# combination is skipped every night from then on - a silent, permanent hole in
+# the matrix, and the only way out was to remember to pass FORCE.
+#
+# Strictly one-directional: a name that is absent here can turn a skip into a
+# build, and nothing here can turn a build into a skip. So an empty list -
+# inventory skipped, Glance unreachable, the client missing - is not "nothing
+# is in Glance", it is "no answer", and leaves the previous behaviour intact.
+declare -A IN_GLANCE=()
+GLANCE_KNOWN=false
+load_glance() {
+    local n
+    for n in ${GLANCE_NAMES:-}; do
+        [[ -n "$n" ]] && IN_GLANCE["$n"]=1
+    done
+    if ((${#IN_GLANCE[@]})); then
+        GLANCE_KNOWN=true
+        log "glance node images: ${#IN_GLANCE[@]}"
+    else
+        log "no Glance inventory; the published record decides alone"
+    fi
+}
+
 maintained_minors() {
     curl -fsS --retry 3 "$EOL_API" |
         jq -r '.result.releases[] | select(.isMaintained == true) | .name' | sort -V
@@ -159,12 +188,13 @@ resolve_versions() {
 main() {
     command -v jq >/dev/null || { log "jq is required"; exit 1; }
     load_published
+    load_glance
 
     local versions=()
     mapfile -t versions < <(resolve_versions)
     ((${#versions[@]})) || { log "no Kubernetes versions to build"; exit 1; }
 
-    local include=() os arch k8s name version element release runner asset dc
+    local include=() os arch k8s name version element release runner asset image dc
     for k8s in "${versions[@]}"; do
         while read -r os; do
             [[ -n "$os" ]] || continue
@@ -178,12 +208,22 @@ main() {
                 # The manifest, not the image: a release carries the record
                 # of what was built, while the image itself stays in the
                 # datacenter. Both the cache and a release have this name.
-                asset="${name}-${version}-v${k8s}-${arch}.manifest.json"
-                if [[ -n "${PUBLISHED[$asset]:-}" ]]; then
-                    log "skip ${asset} (published)"
-                    continue
-                fi
+                image="${name}-${version}-v${k8s}-${arch}"
+                asset="${image}.manifest.json"
                 if in_datacenter "$runner"; then dc=true; else dc=false; fi
+                if [[ -n "${PUBLISHED[$asset]:-}" ]]; then
+                    # Only a combination that goes to Glance can be missing
+                    # from it. arm64 never does - there is no arm64 compute
+                    # here - so it is published to Releases only, and asking
+                    # Glance about it would rebuild it every single night.
+                    if [[ "$GLANCE_KNOWN" == true && "$dc" == true &&
+                          -z "${IN_GLANCE[$image]:-}" ]]; then
+                        log "rebuild ${image}: recorded as built, but not in Glance"
+                    else
+                        log "skip ${asset} (published)"
+                        continue
+                    fi
+                fi
                 include+=("$(jq -nc \
                     --arg os "$os" --arg os_name "$name" --arg os_version "$version" \
                     --arg element "$element" --arg release "$release" \

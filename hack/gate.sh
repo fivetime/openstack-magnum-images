@@ -55,7 +55,10 @@ command -v jq >/dev/null        || env_die "jq is required"
 m() { jq -r --arg k "$1" 'if has($k) then .[$k] else "" end' "$MANIFEST"; }
 K8S=$(m k8s_version)
 ARCH=$(m arch)
+OS_NAME=$(m os_name)
+OS_VERSION=$(m os_version)
 [[ -n "$K8S" && -n "$ARCH" ]] || env_die "manifest is missing k8s_version/arch"
+[[ -n "$OS_NAME" && -n "$OS_VERSION" ]] || env_die "manifest is missing os_name/os_version"
 
 GATE_FLAVOR=${GATE_FLAVOR:-magnum-medium}
 GATE_TIMEOUT=${GATE_TIMEOUT:-900}
@@ -73,7 +76,22 @@ GATE_LABELS=${GATE_LABELS:-"kube_tag=v${K8S},octavia_provider=ovn,octavia_lb_alg
 
 SUFFIX=${GITHUB_RUN_ID:-$(date +%s)}
 NAME="gate-v${K8S}-${ARCH}-${SUFFIX}"
-DURABLE_TMPL="k8s-v${K8S}"
+
+# Every distro building the same Kubernetes version used to publish a template
+# called k8s-v<K8S>, so all four contended for one name and whichever finished
+# last won. Qualify the durable template by distro, and let one designated
+# distro additionally carry the short name a tenant actually asks for.
+#
+# GATE_DEFAULT_OS names that distro as <os_name>/<os_version>. Set it to the
+# empty string to publish only qualified names.
+GATE_DEFAULT_OS=${GATE_DEFAULT_OS:-ubuntu/24.04}
+DURABLE_TMPL="k8s-v${K8S}-${OS_NAME}-${OS_VERSION}"
+SHORT_TMPL=""
+# An `if`, not `[[ ... ]] && ...`: under `set -e` the && form returns 1 for
+# every distro that is not the default, which would end the gate right here.
+if [[ -n "$GATE_DEFAULT_OS" && "${OS_NAME}/${OS_VERSION}" == "$GATE_DEFAULT_OS" ]]; then
+    SHORT_TMPL="k8s-v${K8S}"
+fi
 
 # ---------------------------------------------------------------- skip path
 #
@@ -345,36 +363,69 @@ fi
 # A cluster template cannot be modified while a cluster references it, so the
 # durable template is replaced rather than updated. When the old one is in use,
 # keep it and publish a dated one beside it instead of failing.
-if openstack coe cluster template show "$DURABLE_TMPL" >/dev/null 2>&1; then
-    # `template delete` is asynchronous: it answers "Request to delete ...
-    # accepted" and exits 0 even when the delete then fails because a cluster
-    # still references the template. Trusting that exit code produced two
-    # templates with the same name, which makes every later `show <name>`
-    # ambiguous. So check the template is actually gone.
-    openstack coe cluster template delete "$DURABLE_TMPL" >/dev/null 2>&1 || true
-    deadline=$((SECONDS + 60))
-    while ((SECONDS < deadline)); do
-        openstack coe cluster template show "$DURABLE_TMPL" >/dev/null 2>&1 || break
-        sleep 5
-    done
-    if openstack coe cluster template show "$DURABLE_TMPL" >/dev/null 2>&1; then
-        DURABLE_TMPL="k8s-v${K8S}-$(date +%Y%m%d-%H%M)"
-        warn "existing template is still referenced by a cluster; publishing ${DURABLE_TMPL} instead"
-    else
-        log "replaced existing template k8s-v${K8S}"
+#
+# Magnum does not make template names unique, and that is the trap here:
+# `template show <name>` answers 409 "Multiple ClusterTemplates exist with same
+# name" once there are two, which an `if` cannot tell from "does not exist". The
+# previous version read that as absence, skipped the delete and created another
+# - so one duplicate became two, then three, and every `show <name>` after that
+# was permanently ambiguous. Enumerate by name and act on UUIDs instead: that
+# answers "how many" rather than "does one resolve".
+tmpl_uuids() {
+    openstack coe cluster template list -f value -c uuid -c name 2>/dev/null |
+        awk -v n="$1" '$2 == n { print $1 }'
+}
+
+publish_template() {
+    local want=$1 name=$1 uuid deadline
+    local -a existing=()
+
+    mapfile -t existing < <(tmpl_uuids "$want")
+    if ((${#existing[@]})); then
+        for uuid in "${existing[@]}"; do
+            openstack coe cluster template delete "$uuid" >/dev/null 2>&1 || true
+        done
+        # `template delete` is asynchronous: it answers "Request to delete ...
+        # accepted" and exits 0 even when the delete then fails because a
+        # cluster still references the template. Wait for the count to reach
+        # zero rather than trusting that exit code.
+        deadline=$((SECONDS + 60))
+        while ((SECONDS < deadline)); do
+            mapfile -t existing < <(tmpl_uuids "$want")
+            ((${#existing[@]})) || break
+            sleep 5
+        done
+        mapfile -t existing < <(tmpl_uuids "$want")
+        if ((${#existing[@]})); then
+            name="${want}-$(date +%Y%m%d-%H%M)"
+            warn "${want} is still referenced by a cluster (${#existing[@]} left); publishing ${name} instead"
+        else
+            log "replaced existing template ${want}"
+        fi
     fi
+
+    openstack coe cluster template create \
+        --coe kubernetes --server-type vm \
+        --image "$IMAGE_ID" \
+        --flavor "$GATE_FLAVOR" --master-flavor "$GATE_FLAVOR" \
+        --external-network "$GATE_EXTERNAL_NET" \
+        --network-driver "$GATE_NETWORK_DRIVER" \
+        --dns-nameserver "$GATE_DNS" \
+        --master-lb-enabled --floating-ip-enabled --public \
+        --labels "$GATE_LABELS" \
+        "$name" >/dev/null || {
+        warn "image promoted but template ${name} could not be created"
+        return 1
+    }
+
+    log "published template ${name} -> image ${IMAGE_ID}"
+}
+
+# Neither publish decides the verdict: the image has already passed and been
+# promoted by this point, and `set -e` on the last command of the script would
+# turn a template hiccup into a rejected image.
+publish_template "$DURABLE_TMPL" || true
+if [[ -n "$SHORT_TMPL" ]]; then
+    publish_template "$SHORT_TMPL" || true
 fi
-
-openstack coe cluster template create \
-    --coe kubernetes --server-type vm \
-    --image "$IMAGE_ID" \
-    --flavor "$GATE_FLAVOR" --master-flavor "$GATE_FLAVOR" \
-    --external-network "$GATE_EXTERNAL_NET" \
-    --network-driver "$GATE_NETWORK_DRIVER" \
-    --dns-nameserver "$GATE_DNS" \
-    --master-lb-enabled --floating-ip-enabled --public \
-    --labels "$GATE_LABELS" \
-    "$DURABLE_TMPL" >/dev/null ||
-    warn "image promoted but template ${DURABLE_TMPL} could not be created"
-
-log "published template ${DURABLE_TMPL} -> image ${IMAGE_ID}"
+exit 0
