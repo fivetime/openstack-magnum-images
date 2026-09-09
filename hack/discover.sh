@@ -26,6 +26,8 @@ set -Eeuo pipefail
 
 # os entries are the same four-field strings ci.yaml uses:
 #   <name>/<version>/<dib-element>/<dib-release>
+# Separated by any whitespace: newlines here, spaces when passed as the `os`
+# input of a manual run. An entry never contains whitespace itself.
 OS_LIST=${OS_LIST:-"debian/13/debian-minimal/trixie
 ubuntu/22.04/ubuntu-minimal/jammy
 ubuntu/24.04/ubuntu-minimal/noble
@@ -220,8 +222,7 @@ main() {
 
     local include=() os arch k8s name version element release runner asset image dc
     for k8s in "${versions[@]}"; do
-        while read -r os; do
-            [[ -n "$os" ]] || continue
+        for os in $OS_LIST; do
             IFS=/ read -r name version element release <<<"$os"
             for arch in $ARCH_LIST; do
                 case "$arch" in
@@ -259,7 +260,7 @@ main() {
                       element:$element, release:$release, k8s:$k8s,
                       arch:$arch, runner:$runner, in_datacenter:$in_datacenter}')")
             done
-        done <<<"$OS_LIST"
+        done
     done
 
     local matrix empty=false
