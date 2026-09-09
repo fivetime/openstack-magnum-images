@@ -9,7 +9,14 @@ set -eu
 set -o pipefail
 
 if [ -f /etc/redhat-release ]; then
-    rpm --import https://www.elrepo.org/RPM-GPG-KEY-elrepo.org
+    # ELRepo signs with two keys. The 2009 DSA-1024 key cannot even be
+    # imported on EL10 - rpm-sequoia's policy rejects its SHA-1 self-signature
+    # ("No binding signature at time ...") - while the 2025 RSA-4096 "v2" key
+    # imports everywhere. el9 packages still verify against the old key, so
+    # import v2 unconditionally and the legacy key wherever rpm accepts it.
+    rpm --import https://www.elrepo.org/RPM-GPG-KEY-v2-elrepo.org
+    rpm --import https://www.elrepo.org/RPM-GPG-KEY-elrepo.org ||
+        echo "legacy ELRepo key rejected by this release's rpm policy; the v2 key is in place"
     # The release package is named after the EL major, which is DIB_RELEASE
     # for the *-container elements (9, 10); el9 was hardcoded here before
     # Rocky Linux 10 and AlmaLinux 10 joined the matrix.
