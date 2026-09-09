@@ -99,14 +99,20 @@ echo "$RUNNER_TEMP/osc/bin" >> "$GITHUB_PATH"
 
 ## "已构建"由谁记录
 
-Release 变成可选之后，就不能只靠它了。`discover.sh` 认两处，任一命中即跳过：
+Release 变成可选之后，就不能只靠它了。`discover.sh` 认三处：
 
-1. **本地缓存** `$IMAGE_CACHE/<name>.manifest.json`（常驻 runner 时才有意义）
-2. **Release 资产** —— 跨机器、跨缓存清空仍然有效
+1. **Glance 里有没有这个镜像**（`inventory` job 在数据中心内列出来交给它）——
+   对要进 Glance 的组合这是**唯一判据**：在就跳过，不在就构建，Release 怎么说都不算。
+   两个方向的漂移都靠它治：Release 记着但 Glance 里被手删了 → 重建；Glance 里有但
+   从没发过 Release（`RELEASE_ENABLED` 一直没开、runner 又是一次性 VM 没缓存）→ 跳过。
+   后者曾让每晚把整个矩阵重建、重门禁、重推一遍。
+2. **本地缓存** `$IMAGE_CACHE/<name>.manifest.json`（常驻 runner 时才有意义）
+3. **Release 资产** —— 跨机器、跨缓存清空仍然有效
 
-判据是 **manifest 名**而不是 `.raw.gz`（Release 里已经没有镜像本体了）。
-它回答的只是"这个组合构建过没有"，不是"这个镜像好不好"，所以 prerelease 也算数。
-要重新构建一个已有的组合，用 `force=true`。
+2、3 只在拿不到 Glance 答案时（inventory 跳过、API 不通）或对不进 Glance 的
+arm64 组合起作用。判据是 **manifest 名**而不是 `.raw.gz`（Release 里已经没有
+镜像本体了）。它回答的只是"这个组合构建过没有"，不是"这个镜像好不好"，所以
+prerelease 也算数。要重新构建一个已有的组合，用 `force=true`。
 
 `prerelease` 标记承载的是**门禁有没有用这个镜像启动过节点**。汇总 job 只在
 该版本的**每一个** manifest 都 `boot_verified: true` 时才转正 —— 一个含 arm64

@@ -129,16 +129,23 @@ load_published() {
 # space-separated list of image names. It cannot be asked here: discover runs
 # on a GitHub-hosted runner, which has no route to the OpenStack API.
 #
-# This exists because the record and the artifact can drift apart. A release
-# asset says "this was built once"; it does not say the image is still in
-# Glance. Delete one out of band and the record still reads published, so the
-# combination is skipped every night from then on - a silent, permanent hole in
-# the matrix, and the only way out was to remember to pass FORCE.
+# This exists because the record and the artifact can drift apart, in both
+# directions:
 #
-# Strictly one-directional: a name that is absent here can turn a skip into a
-# build, and nothing here can turn a build into a skip. So an empty list -
-# inventory skipped, Glance unreachable, the client missing - is not "nothing
-# is in Glance", it is "no answer", and leaves the previous behaviour intact.
+#   - A release asset says "this was built once"; it does not say the image
+#     is still in Glance. Delete one out of band and the record still reads
+#     published, so the combination is skipped every night from then on - a
+#     silent, permanent hole in the matrix.
+#   - An image can be in Glance with no release recording it at all. The
+#     release upload is optional and the runners are throwaway VMs with no
+#     cache, so with RELEASE_ENABLED off nothing ever recorded a build, and
+#     every nightly rebuilt, re-gated and re-pushed the whole matrix.
+#
+# So for a combination that goes to Glance, Glance is the record: present
+# means built, absent means build, whatever the release assets say. Only when
+# there is no Glance answer at all - inventory skipped, Glance unreachable, the
+# client missing - does the release record decide alone. An empty list is not
+# "nothing is in Glance", it is "no answer".
 declare -A IN_GLANCE=()
 GLANCE_KNOWN=false
 load_glance() {
@@ -224,18 +231,20 @@ main() {
                 image="${name}-${version}-v${k8s}-${arch}"
                 asset="${image}.manifest.json"
                 if in_datacenter "$runner"; then dc=true; else dc=false; fi
-                if [[ -n "${PUBLISHED[$asset]:-}" ]]; then
-                    # Only a combination that goes to Glance can be missing
-                    # from it. arm64 never does - there is no arm64 compute
-                    # here - so it is published to Releases only, and asking
-                    # Glance about it would rebuild it every single night.
-                    if [[ "$GLANCE_KNOWN" == true && "$dc" == true &&
-                          -z "${IN_GLANCE[$image]:-}" ]]; then
-                        log "rebuild ${image}: recorded as built, but not in Glance"
-                    else
-                        log "skip ${asset} (published)"
+                # Only a combination that goes to Glance can be judged by
+                # Glance. arm64 never does - there is no arm64 compute here -
+                # so it is published to Releases only, and asking Glance about
+                # it would rebuild it every single night.
+                if [[ "$GLANCE_KNOWN" == true && "$dc" == true ]]; then
+                    if [[ -n "${IN_GLANCE[$image]:-}" ]]; then
+                        log "skip ${image} (in Glance)"
                         continue
+                    elif [[ -n "${PUBLISHED[$asset]:-}" ]]; then
+                        log "rebuild ${image}: recorded as built, but not in Glance"
                     fi
+                elif [[ -n "${PUBLISHED[$asset]:-}" ]]; then
+                    log "skip ${asset} (published)"
+                    continue
                 fi
                 include+=("$(jq -nc \
                     --arg os "$os" --arg os_name "$name" --arg os_version "$version" \
