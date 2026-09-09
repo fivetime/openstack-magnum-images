@@ -35,6 +35,13 @@ rockylinux/9/rocky-container/9"}
 # under qemu-user is slow and fragile, so cross-building is not an option.
 ARCH_LIST=${ARCH_LIST:-"amd64 arm64"}
 
+# Oldest Kubernetes minor to build. endoflife.date reports every series still
+# maintained upstream, which is wider than what this cloud offers: we started
+# at 1.37 and carry no earlier series, so their images and cluster templates
+# are never produced. Raise it when a series is retired here. Only discovery is
+# floored; K8S_LIST is an explicit pin and builds whatever it names.
+K8S_MIN_MINOR=${K8S_MIN_MINOR:-1.37}
+
 # Runner labels per architecture.
 #
 # amd64 builds on a self-hosted runner inside the datacenter by default, so the
@@ -173,8 +180,14 @@ resolve_versions() {
     local minors=() minor k8s
     mapfile -t minors < <(maintained_minors)
     ((${#minors[@]})) || { log "no maintained Kubernetes minors reported"; exit 1; }
-    log "maintained minors: ${minors[*]}"
+    log "maintained minors: ${minors[*]} (floor ${K8S_MIN_MINOR})"
     for minor in "${minors[@]}"; do
+        # minor >= floor: after a version sort the minor comes last. When
+        # both are the same string either line satisfies the test.
+        if [[ "$(printf '%s\n' "$K8S_MIN_MINOR" "$minor" | sort -V | tail -1)" != "$minor" ]]; then
+            log "SKIP ${minor}: below K8S_MIN_MINOR=${K8S_MIN_MINOR}"
+            continue
+        fi
         if k8s=$(latest_patch "$minor"); then
             printf '%s\n' "$k8s"
         else

@@ -44,6 +44,10 @@ on:
         description: 'Kubernetes versions, space separated (empty: discover)'
         type: string
         default: ""
+      min_k8s:
+        description: 'Oldest minor discovery may build (empty: script default)'
+        type: string
+        default: ""
       os:
         description: 'OS entries name/version/element/release (empty: all)'
         type: string
@@ -171,6 +175,7 @@ jobs:
           FORCE: ${{ inputs.force }}
           GH_TOKEN: ${{ github.token }}
           K8S_LIST: ${{ inputs.k8s }}
+          K8S_MIN_MINOR: ${{ inputs.min_k8s || '1.37' }}
           OS_LIST: ${{ inputs.os }}
           ARCH_LIST: ${{ inputs.arch }}
           RUNNER_AMD64: ${{ vars.BUILD_RUNNER || 'ubuntu-24.04' }}
