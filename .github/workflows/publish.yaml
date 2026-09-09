@@ -315,6 +315,13 @@ jobs:
           ELEMENTS_PATH: ${{ github.workspace }}/elements
           DIB_RELEASE: ${{ matrix.release }}
           DIB_KUBERNETES_VERSION: ${{ matrix.k8s }}
+          # The *-container elements (Rocky, AlmaLinux) build their base with
+          # podman. Rootless podman wants a systemd user session for the
+          # container's cgroup, and the RaaS runner has none: the runner is a
+          # service, not a login, so crun fails with "sd-bus call: Interactive
+          # authentication required". Root podman needs no session bus, and
+          # sudo is passwordless here as DIB already relies on.
+          DIB_CONTAINERFILE_PODMAN_ROOT: "1"
           # The elements already read these; resolving them here is what makes
           # the image carry the newest runtime instead of a stale default.
           DIB_CONTAINERD_VERSION: ${{ env.CONTAINERD_VERSION }}

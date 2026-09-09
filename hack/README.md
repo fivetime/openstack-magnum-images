@@ -194,4 +194,7 @@ IMAGE_STORE=rbd ./hack/glance/push.sh ubuntu-24.04-v1.37.0-amd64.raw \
 4. **DIB 基础元素与 runner 工具链**。Ubuntu 新版本要 runner 的 debootstrap 认识那个
    代号；noble 的 debootstrap 不认识 resolute，`publish.yaml` 在构建前补一个
    `scripts/<release> -> gutsy` 的符号链接。EL 的 elrepo 内核按 `DIB_RELEASE` 选
-   `el9`/`el10`。
+   `el9`/`el10`。EL 基底由 podman 从容器镜像导出：RaaS runner 是服务不是登录会话，
+   rootless podman 找不到 systemd 用户会话、crun 报 "sd-bus call: Interactive
+   authentication required"，所以 `publish.yaml` 设 `DIB_CONTAINERFILE_PODMAN_ROOT=1`
+   走 `sudo podman`。Rocky 9 以前能过只是因为 Actions cache 里有基底 tarball，没真跑 podman。
