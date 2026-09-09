@@ -6,5 +6,23 @@
       "iproute2": "iproute",
       "mount": "util-linux"
     }
+  },
+  "release": {
+    "rocky": {
+      "10": {
+        "conntrack": "conntrack-tools",
+        "ebtables": "",
+        "iproute2": "iproute",
+        "mount": "util-linux"
+      }
+    },
+    "almalinux": {
+      "10": {
+        "conntrack": "conntrack-tools",
+        "ebtables": "",
+        "iproute2": "iproute",
+        "mount": "util-linux"
+      }
+    }
   }
 }

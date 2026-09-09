@@ -72,13 +72,14 @@ esac
 
 # os_distro is not decoration: magnum/api/attr_validator.py raises
 # OSDistroFieldNotFound when it is absent, so a cluster template cannot even
-# be created against an image that lacks it.
-case "$OS_NAME" in
-    ubuntu)      OS_DISTRO=ubuntu ;;
-    debian)      OS_DISTRO=debian ;;
-    rockylinux)  OS_DISTRO=rocky ;;
-    *)           OS_DISTRO=$OS_NAME ;;
-esac
+# be created against an image that lacks it. And it must be spelled exactly
+# as a magnum-cluster-api driver's `provides` entry - ubuntu, debian,
+# rockylinux, almalinux - because Magnum picks the driver by string equality
+# on (server_type, os_distro, coe). Rocky was `rocky` here for four days and
+# every template creation failed with "Cluster type (vm, rocky, kubernetes)
+# is not supported by any loaded cluster driver"; the gate did not notice
+# because it boots the image directly, without Magnum.
+OS_DISTRO=$OS_NAME
 
 props=(
     --property "os_distro=${OS_DISTRO}"

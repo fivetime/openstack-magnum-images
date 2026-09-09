@@ -1,6 +1,6 @@
 apparmor:
   when: DISTRO_NAME = debian
 container-selinux:
-  when: DISTRO_NAME = rocky
+  when: NODE_OS_FAMILY = redhat
 curl:
 libseccomp2:

@@ -1,10 +1,13 @@
 # NOTE(fitbeard): We don't need cockpit on Rocky Linux.
+# NODE_OS_FAMILY (environment.d/50-os-family) is `redhat` for every EL rebuild
+# we build - Rocky Linux and AlmaLinux - so the EL-only entries below apply to
+# all of them. `when:` can only compare one variable against one value.
 cockpit-ws:
   uninstall: true
-  when: DISTRO_NAME = rocky
+  when: NODE_OS_FAMILY = redhat
 cockpit-system:
   uninstall: true
-  when: DISTRO_NAME = rocky
+  when: NODE_OS_FAMILY = redhat
 # NOTE(fitbeard): Uninstalling 'linux-firmware' package
 #                 saves 400Mb of final image size.
 linux-firmware:
@@ -14,6 +17,6 @@ logrotate:
 lvm2:
 # NOTE(fitbeard): Use plain systemd-networkd for Debian and Rocky Linux.
 systemd-networkd:
-  when: DISTRO_NAME = rocky
+  when: NODE_OS_FAMILY = redhat
 systemd-resolved:
   when: DISTRO_NAME != ubuntu

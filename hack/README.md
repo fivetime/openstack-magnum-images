@@ -39,7 +39,7 @@ minor。它不报错，就是错。
 
 | 脚本 | 职责 |
 |---|---|
-| `discover.sh` | 运行时算出构建矩阵：维护中的 minor × OS × 架构，扣掉已发布的组合。输出 GitHub matrix JSON |
+| `discover.sh` | 运行时算出构建矩阵：维护中的 minor × OS × 架构，扣掉已发布的组合。输出 GitHub matrix JSON。OS 列表在脚本顶部 `OS_LIST`：Debian 13、Ubuntu 22.04/24.04/26.04、Rocky 9/10、AlmaLinux 9/10 |
 | `verify-image.sh` | loop 挂载刚构建的 raw，**从文件系统里读回**二进制是否存在、kubelet 版本是否真等于声称的版本、containerd 是否 `SystemdCgroup = true`，写 manifest |
 | `glance/push.sh` | 按 manifest 打属性传 Glance，`copy-image` 路由进 RBD store 并轮询确认。**传上去是 private** |
 | `gate.sh` | 用该镜像真的开一个 Magnum 集群，等 `CREATE_COMPLETE`、等所有节点 Ready、滚一个 Deployment、核对 kubelet 版本；通过才 `--public` 并发布集群模板；无论成败都拆干净 |
@@ -170,3 +170,28 @@ IMAGE_STORE=rbd ./hack/glance/push.sh ubuntu-24.04-v1.37.0-amd64.raw \
 ```
 
 `GATE_KEEP=true` 会在门禁结束后把集群留着供排查。
+
+## 发行版矩阵与加新发行版要动的地方
+
+当前 `OS_LIST`（`discover.sh`）：Debian 13 trixie · Ubuntu 22.04 jammy / 24.04 noble /
+26.04 resolute · Rocky Linux 9 / 10 · AlmaLinux 9 / 10。上游 `ci.yaml` 只跑前四个，
+那是上游的 PR 门禁，不必跟。
+
+一个发行版能不能进矩阵由四道闸决定，加新发行版就是把这四处都过一遍：
+
+1. **Magnum 按 `os_distro` 精确匹配 driver**。镜像的 `os_distro` 必须逐字等于
+   magnum-cluster-api 某个 driver 的 `provides.os`（`ubuntu`/`debian`/`rockylinux`/
+   `almalinux`）。`push.sh` 直接用 `os_name` 当 `os_distro`，所以 `OS_LIST` 里的第一段
+   必须按 driver 的拼法写。曾经把 Rocky 写成 `rocky`，模板创建静默失败了四天——门禁
+   是直接开机跑 kubeadm 的，不经过 Magnum，发现不了这种错。
+2. **元素只认 apt 和 dnf**。EL 系用 `NODE_OS_FAMILY=redhat`
+   （`elements/kubernetes/environment.d/50-os-family.bash`）统一处理，
+   `package-installs.yaml` 的 `when:` 只能比较一个变量、YAML 键不能重复，
+   所以不要再按发行版名逐个写 `when:`。
+3. **EL10 没有 legacy 防火墙包**：EPEL 10 不再提供 `ebtables-legacy`/`iptables-legacy`，
+   `kubelet`/`cni-plugins` 的 `pkg-map` 对 rocky/almalinux 10 单独映射到 `iptables-nft`、
+   跳过 ebtables。
+4. **DIB 基础元素与 runner 工具链**。Ubuntu 新版本要 runner 的 debootstrap 认识那个
+   代号；noble 的 debootstrap 不认识 resolute，`publish.yaml` 在构建前补一个
+   `scripts/<release> -> gutsy` 的符号链接。EL 的 elrepo 内核按 `DIB_RELEASE` 选
+   `el9`/`el10`。

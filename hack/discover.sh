@@ -29,7 +29,11 @@ set -Eeuo pipefail
 OS_LIST=${OS_LIST:-"debian/13/debian-minimal/trixie
 ubuntu/22.04/ubuntu-minimal/jammy
 ubuntu/24.04/ubuntu-minimal/noble
-rockylinux/9/rocky-container/9"}
+ubuntu/26.04/ubuntu-minimal/resolute
+rockylinux/9/rocky-container/9
+rockylinux/10/rocky-container/10
+almalinux/9/almalinux-container/9
+almalinux/10/almalinux-container/10"}
 
 # Architectures to build. Both are native builds on their own runner; dib
 # under qemu-user is slow and fragile, so cross-building is not an option.

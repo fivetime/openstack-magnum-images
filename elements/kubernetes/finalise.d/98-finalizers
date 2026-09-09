@@ -8,8 +8,9 @@ fi
 set -eu
 set -o pipefail
 
-if [[ ${DISTRO_NAME} =~ (debian|rocky) ]]; then
+if [[ ${DISTRO_NAME} == debian || ${NODE_OS_FAMILY} == redhat ]]; then
     # NOTE(fitbeard): Use plain systemd-networkd services for Debian and Rocky Linux.
+    # The same applies to every EL rebuild (AlmaLinux too), see NODE_OS_FAMILY.
     systemctl enable systemd-networkd
     systemctl enable systemd-resolved
     ln -sf /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
@@ -33,6 +34,13 @@ if [ -f /etc/redhat-release ]; then
     fi
 
     sed -i '1i # Modified for cloud image' /etc/cloud/cloud.cfg
-    echo -e 'rocky\tALL=(ALL)\tNOPASSWD: ALL' >> /etc/sudoers
-    sed -i 's/name: cloud-user/name: rocky/g' /etc/cloud/cloud.cfg
+    # The default login user is named after the distribution, as the official
+    # cloud images do: `rocky` on Rocky Linux, `almalinux` on AlmaLinux.
+    case "${DISTRO_NAME}" in
+        rocky)     cloud_user=rocky ;;
+        almalinux) cloud_user=almalinux ;;
+        *)         cloud_user=cloud-user ;;
+    esac
+    echo -e "${cloud_user}\tALL=(ALL)\tNOPASSWD: ALL" >> /etc/sudoers
+    sed -i "s/name: cloud-user/name: ${cloud_user}/g" /etc/cloud/cloud.cfg
 fi

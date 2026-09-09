@@ -261,6 +261,17 @@ jobs:
       - if: matrix.element == 'ubuntu-minimal'
         run: sudo chown root /bin/tar && sudo chmod u+s /bin/tar
 
+      # debootstrap knows a release by a script named after it, and Ubuntu's
+      # scripts are all symlinks to one generic script. The runner is noble,
+      # whose debootstrap (1.0.134) predates resolute (26.04) and never learns
+      # it through updates, so the symlink has to be added here. Harmless for
+      # a release the package already knows.
+      - if: matrix.element == 'ubuntu-minimal'
+        run: |
+          d=/usr/share/debootstrap/scripts
+          [ -e "$d/${{ matrix.release }}" ] || sudo ln -s gutsy "$d/${{ matrix.release }}"
+          ls -l "$d/${{ matrix.release }}"
+
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: /home/runner/.cache/image-create

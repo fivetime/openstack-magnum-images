@@ -4,5 +4,19 @@
       "arping": "iputils",
       "iptables": "iptables iptables-libs iptables-legacy iptables-legacy-libs"
     }
+  },
+  "release": {
+    "rocky": {
+      "10": {
+        "arping": "iputils",
+        "iptables": "iptables-nft"
+      }
+    },
+    "almalinux": {
+      "10": {
+        "arping": "iputils",
+        "iptables": "iptables-nft"
+      }
+    }
   }
 }

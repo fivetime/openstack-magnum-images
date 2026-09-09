@@ -1,5 +1,5 @@
 chrony:
-  when: DISTRO_NAME = rocky
+  when: NODE_OS_FAMILY = redhat
 conntrack:
 coreutils:
 curl:

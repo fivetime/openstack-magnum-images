@@ -10,7 +10,10 @@ set -o pipefail
 
 if [ -f /etc/redhat-release ]; then
     rpm --import https://www.elrepo.org/RPM-GPG-KEY-elrepo.org
-    dnf install -y https://www.elrepo.org/elrepo-release-${DIB_RELEASE}.el9.elrepo.noarch.rpm
+    # The release package is named after the EL major, which is DIB_RELEASE
+    # for the *-container elements (9, 10); el9 was hardcoded here before
+    # Rocky Linux 10 and AlmaLinux 10 joined the matrix.
+    dnf install -y "https://www.elrepo.org/elrepo-release-${DIB_RELEASE}.el${DIB_RELEASE}.elrepo.noarch.rpm"
 
     dnf --enablerepo=elrepo-kernel install -y kernel-${DIB_ELREPO_KERNEL_TYPE}
 fi
