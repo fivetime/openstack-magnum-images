@@ -292,7 +292,14 @@ openstack subnet create "$NAME" --network "$NAME" --subnet-range "$GATE_SUBNET" 
 CLEAN_SUBNET=true
 
 log "booting ${NAME} from image ${IMAGE_ID}"
-# --config-drive: user-data has to arrive without a metadata route.
+# --config-drive is asked for, and nova does attach one (an IDE cdrom on the
+# i440fx machine type), but the UEFI guests these images boot as never see it:
+# lsblk inside the VM shows only vda, and cloud-init settles on
+# DataSourceOpenStackLocal - the OVN metadata service on the compute host,
+# which answers on 169.254.169.254 without any router. So in practice the
+# user-data arrives through that metadata service, and a compute host whose
+# metadata namespace is broken produces "DataSourceNone" and a VM that never
+# runs the test. That is the cloud, not the image; see the verdict below.
 openstack server create "$NAME" \
     --image "$IMAGE_ID" --flavor "$GATE_FLAVOR" \
     --network "$NAME" --config-drive true \
@@ -336,6 +343,17 @@ dump_console() {
 
 if [[ -z "$result" ]]; then
     dump_console
+    # cloud-init finished without any datasource: the VM booted fine but never
+    # received the user-data, so the test never started. Five images were
+    # rejected in one run for exactly this while one compute host's OVN
+    # metadata service was hijacked; the same images passed on the other host.
+    # An image cannot cause this, so it is an environment verdict, not a
+    # rejection - and the console is checked once more here rather than
+    # trusting the copy the poll loop last saw, which may predate cloud-init.
+    if openstack console log show "$NAME" 2>/dev/null |
+           grep -q 'Datasource DataSourceNone'; then
+        env_die "cloud-init found no datasource (the compute host's metadata service did not answer) - the test never ran, so this says nothing about the image"
+    fi
     die "the image never reported a result within ${GATE_TIMEOUT}s"
 fi
 
