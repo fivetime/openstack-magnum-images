@@ -42,11 +42,12 @@ almalinux/10/almalinux-container/10"}
 ARCH_LIST=${ARCH_LIST:-"amd64 arm64"}
 
 # Oldest Kubernetes minor to build. endoflife.date reports every series still
-# maintained upstream, which is wider than what this cloud offers: we started
-# at 1.37 and carry no earlier series, so their images and cluster templates
-# are never produced. Raise it when a series is retired here. Only discovery is
-# floored; K8S_LIST is an explicit pin and builds whatever it names.
-K8S_MIN_MINOR=${K8S_MIN_MINOR:-1.37}
+# maintained upstream, which is wider than what this cloud offers. 1.36 is the
+# floor: the platform cluster runs 1.36 and Cilium does not yet support 1.37,
+# so 1.36 nodes are what tenants get today and 1.37 is built ahead of time.
+# Raise it when a series is retired here. Only discovery is floored; K8S_LIST
+# is an explicit pin and builds whatever it names.
+K8S_MIN_MINOR=${K8S_MIN_MINOR:-1.36}
 
 # Runner labels per architecture.
 #
