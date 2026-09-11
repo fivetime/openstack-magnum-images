@@ -157,6 +157,13 @@ declare -A IN_GLANCE=()
 GLANCE_KNOWN=false
 load_glance() {
     local n
+    # A forced rebuild has to get past this record too. It used to skip only
+    # the release record, so `force=true os=almalinux/10` announced
+    # "rebuilding everything" and then built nothing: the image was in Glance.
+    if [[ "${FORCE:-false}" == true ]]; then
+        log "FORCE=true: the Glance inventory does not skip anything either"
+        return
+    fi
     for n in ${GLANCE_NAMES:-}; do
         [[ -n "$n" ]] && IN_GLANCE["$n"]=1
     done
