@@ -20,15 +20,47 @@ fi
 set -eu
 set -o pipefail
 
-# gVisor publishes a rolling "latest" pointer per architecture rather than
-# tagged releases, plus a sha512 for every artifact.
+# gVisor has no tagged GitHub releases to ask for "the newest"; its release
+# bucket has one directory per dated release (20260928.0, ...) and a rolling
+# "latest" directory. The build resolves "latest" to the newest dated release
+# before downloading anything, for two reasons:
+#
+#   - the image records which release it carries, and a log that says
+#     "latest is 20260928.0" explains a failure that a bare 404 does not;
+#   - the layout of a release changed under us once already. Up to 20260817.0
+#     each binary was published on its own with a .sha512 beside it; from
+#     20260831.0 on there is only gvisor.tar.{zstd,bz2} holding runsc,
+#     containerd-shim-runsc-v1 and helpers. The per-file URLs under "latest"
+#     started answering 404 on 2026-09-17 and failed every build after that.
+#
+# Both layouts are handled, so a pinned older release still builds.
 DIB_GVISOR_RELEASE=${DIB_GVISOR_RELEASE:-latest}
 case "${ARCH}" in
     amd64) GVISOR_ARCH=x86_64 ;;
     arm64) GVISOR_ARCH=aarch64 ;;
     *) echo "gvisor: unsupported architecture ${ARCH}" >&2; exit 1 ;;
 esac
-DIB_GVISOR_URL=${DIB_GVISOR_URL:-"https://storage.googleapis.com/gvisor/releases/release/${DIB_GVISOR_RELEASE}/${GVISOR_ARCH}"}
+GVISOR_BUCKET=${DIB_GVISOR_BUCKET:-"https://storage.googleapis.com/gvisor/releases/release"}
+
+if [ "${DIB_GVISOR_RELEASE}" = latest ]; then
+    # The JSON listing, not a scraped HTML page: one request, no auth, and the
+    # prefixes are exactly the release directories. Newest first, and the first
+    # one that actually carries a tarball for this architecture wins - a
+    # release is uploaded architecture by architecture, and a build should not
+    # catch it half-way.
+    for rel in $(curl -fsS "https://storage.googleapis.com/storage/v1/b/gvisor/o?prefix=releases/release/&delimiter=/&maxResults=1000" |
+                 grep -oE 'releases/release/[0-9]{8}\.[0-9]+/' | sed 's|releases/release/||; s|/$||' |
+                 sort -t. -k1,1nr -k2,2nr | head -5); do
+        if curl -fsI "${GVISOR_BUCKET}/${rel}/${GVISOR_ARCH}/gvisor.tar.zstd" >/dev/null; then
+            DIB_GVISOR_RELEASE=$rel
+            break
+        fi
+    done
+    [ "${DIB_GVISOR_RELEASE}" != latest ] ||
+        { echo "gvisor: could not resolve the newest release from ${GVISOR_BUCKET}" >&2; exit 1; }
+    echo "gvisor: latest resolves to ${DIB_GVISOR_RELEASE}"
+fi
+DIB_GVISOR_URL=${DIB_GVISOR_URL:-"${GVISOR_BUCKET}/${DIB_GVISOR_RELEASE}/${GVISOR_ARCH}"}
 
 # systrap by default: it uses ptrace/seccomp only. The kvm platform is faster
 # but needs /dev/kvm inside the node, which nested virtualisation does not
@@ -40,11 +72,22 @@ TMPDIR=$(mktemp -d)
 trap "rm -rf $TMPDIR" EXIT
 
 cd "${TMPDIR}"
-for f in runsc containerd-shim-runsc-v1; do
-    curl -fsSLO "${DIB_GVISOR_URL}/${f}"
-    curl -fsSLO "${DIB_GVISOR_URL}/${f}.sha512"
-done
-sha512sum -c runsc.sha512 containerd-shim-runsc-v1.sha512
+if curl -fsI "${DIB_GVISOR_URL}/gvisor.tar.zstd" >/dev/null; then
+    # Current layout: one tarball and its sha512 ("<hash>  gvisor.tar.zstd").
+    curl -fsSLO "${DIB_GVISOR_URL}/gvisor.tar.zstd"
+    curl -fsSLO "${DIB_GVISOR_URL}/gvisor.tar.zstd.sha512"
+    sha512sum -c gvisor.tar.zstd.sha512
+    tar --zstd -xf gvisor.tar.zstd runsc containerd-shim-runsc-v1
+else
+    # Layout up to 20260817.0: each binary on its own.
+    for f in runsc containerd-shim-runsc-v1; do
+        curl -fsSLO "${DIB_GVISOR_URL}/${f}"
+        curl -fsSLO "${DIB_GVISOR_URL}/${f}.sha512"
+    done
+    sha512sum -c runsc.sha512 containerd-shim-runsc-v1.sha512
+fi
+[ -s runsc ] && [ -s containerd-shim-runsc-v1 ] ||
+    { echo "gvisor: ${DIB_GVISOR_URL} gave no runsc/containerd-shim-runsc-v1; the release layout has changed again" >&2; exit 1; }
 
 install -m 755 runsc /usr/bin/runsc
 install -m 755 containerd-shim-runsc-v1 /usr/bin/containerd-shim-runsc-v1

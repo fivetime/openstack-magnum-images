@@ -36,3 +36,16 @@ where every Kata handler bar the ptrace-free ones cannot start a pod.
 Set `DIB_GVISOR_PLATFORM=kvm` only where `/dev/kvm` is known to be present in
 the node itself. It is faster; it is also the one setting that gives `runsc`
 the same prerequisite Kata has, and so gives up the property above.
+
+## 版本与下载格式
+
+`DIB_GVISOR_RELEASE` 默认 `latest`，但构建时会先解析成具体的日期版本（列 GCS 桶里的
+`releases/release/<YYYYMMDD.N>/`，取最新且该架构已有 tarball 的那一个），日志里写明
+`latest resolves to …`，镜像记录的是 `runsc --version`。流水线由 `hack/versions.sh`
+统一解析（要求 x86_64 与 aarch64 都已上传），同一次运行的两种架构拿到同一版本。
+
+上游从 **20260831.0** 起不再单独发布 `runsc` / `containerd-shim-runsc-v1`，每个架构只有
+`gvisor.tar.{zstd,bz2}` 及其 `.sha512`；`latest` 目录 2026-09-17 起指向新格式后，老的逐文件
+URL 一律 404，每晚构建因此全挂。现在优先下 tarball，校验 sha512 后只解出这两个文件；
+钉老版本（≤ 20260817.0，逐文件格式）时自动走老路径。
+

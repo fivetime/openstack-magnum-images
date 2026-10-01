@@ -106,8 +106,26 @@ else
     log "NOTE: no cri-tools ${K8S_MINOR}.x published yet; falling back to ${CRICTL}"
 fi
 
+# gVisor has no tagged GitHub releases; its bucket has one directory per dated
+# release. Take the newest one that carries a tarball for both architectures,
+# so an amd64 and an arm64 image from the same run carry the same runsc, and a
+# release that is still being uploaded is not picked half-way. The gvisor
+# element resolves "latest" the same way on its own for a build by hand.
+GVISOR_BUCKET="https://storage.googleapis.com/gvisor/releases/release"
+GVISOR=""
+for rel in $(curl -fsS --retry 3 "https://storage.googleapis.com/storage/v1/b/gvisor/o?prefix=releases/release/&delimiter=/&maxResults=1000" |
+             grep -oE 'releases/release/[0-9]{8}\.[0-9]+/' | sed 's|releases/release/||; s|/$||' |
+             sort -t. -k1,1nr -k2,2nr | head -5); do
+    if curl -fsI "${GVISOR_BUCKET}/${rel}/x86_64/gvisor.tar.zstd" >/dev/null &&
+       curl -fsI "${GVISOR_BUCKET}/${rel}/aarch64/gvisor.tar.zstd" >/dev/null; then
+        GVISOR=$rel
+        break
+    fi
+done
+[[ -n "$GVISOR" ]] || die "cannot resolve the newest gVisor release from ${GVISOR_BUCKET}"
+
 log "kubernetes=${K8S} containerd=${CONTAINERD} runc=${RUNC} cni=${CNI} crictl=${CRICTL}"
-log "crun=${CRUN} kata=${KATA} (used only when those elements are built)"
+log "crun=${CRUN} kata=${KATA} gvisor=${GVISOR} (used only when those elements are built)"
 
 emit() {
     if [[ -n "${GITHUB_ENV:-}" ]]; then printf '%s\n' "$1" >>"$GITHUB_ENV"; fi
@@ -119,3 +137,4 @@ emit "CNI_PLUGINS_VERSION=${CNI}"
 emit "CRI_TOOLS_VERSION=${CRICTL}"
 emit "CRUN_VERSION=${CRUN}"
 emit "KATA_VERSION=${KATA}"
+emit "GVISOR_RELEASE=${GVISOR}"

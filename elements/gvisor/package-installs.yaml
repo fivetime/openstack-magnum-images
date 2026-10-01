@@ -1,0 +1,6 @@
+# From 20260831.0 gVisor ships a .tar.zst rather than loose binaries, and
+# ubuntu-minimal's chroot has no zstd for `tar --zstd` (see the kata element,
+# which hit the same thing first). Installed in 01-package-installs, before
+# 75-gvisor runs.
+curl:
+zstd:
