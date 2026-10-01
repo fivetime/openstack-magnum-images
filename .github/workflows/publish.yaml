@@ -31,6 +31,9 @@
 # merges from vexxhost/capo-image-elements never conflict.
 name: publish
 
+# Manual only. The nightly schedule fanned out 35 jobs every night (and
+# failed every night from 2026-09-23 on) instead of the one API call it was
+# meant to cost; builds now run when someone asks for them.
 on:
   workflow_dispatch:
     inputs:
@@ -39,7 +42,7 @@ on:
         type: boolean
         default: false
       # The four below narrow a run to one combination. Left empty they keep
-      # the discovered behaviour, so the scheduled run is unaffected.
+      # the discovered behaviour.
       k8s:
         description: 'Kubernetes versions, space separated (empty: discover)'
         type: string
@@ -89,9 +92,6 @@ on:
         description: Upload to Glance and run the acceptance gate
         type: boolean
         default: false
-  schedule:
-    # Nightly. Most runs discover nothing new and cost one API call.
-    - cron: "0 3 * * *"
 
 permissions: {}
 

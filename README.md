@@ -14,10 +14,11 @@ with the Cluster API provider for OpenStack.
 
 ## Releases
 
-### Automatic updates
+### Updates
 
-This repository runs nightly updates to grab the latest maintained Kubernetes versions
-and creates a pull request to update the versions in the CI workflow.
+Nothing runs on a schedule in this fork. The `publish` workflow discovers the
+maintained Kubernetes versions when it is started by hand (Actions -> publish ->
+Run workflow); the upstream `bump` and `ci` workflows are disabled.
 
 ### Release images
 
