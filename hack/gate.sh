@@ -32,7 +32,7 @@
 # Environment:
 #   OS_CLOUD / OS_*      OpenStack auth
 #   GATE_FLAVOR          flavor for the VM (default magnum-medium)
-#   GATE_TIMEOUT         seconds to wait for the verdict (default 900)
+#   GATE_TIMEOUT         seconds to wait for the verdict (default 1800)
 #   GATE_BOOT_TIMEOUT    seconds to wait for nova to hand back ACTIVE (default 900)
 #   GATE_KEEP            true to leave the VM and network for debugging
 #   SKIP_GATE            true to skip entirely (no arm64 compute here)
@@ -61,7 +61,10 @@ OS_VERSION=$(m os_version)
 [[ -n "$OS_NAME" && -n "$OS_VERSION" ]] || env_die "manifest is missing os_name/os_version"
 
 GATE_FLAVOR=${GATE_FLAVOR:-magnum-medium}
-GATE_TIMEOUT=${GATE_TIMEOUT:-900}
+# 1800 rather than 900: besides kubeadm init, the VM now starts a pod under
+# every runtime handler, one after another, and a kata guest takes tens of
+# seconds to come up on a nested, two-vCPU node.
+GATE_TIMEOUT=${GATE_TIMEOUT:-1800}
 # Time for nova to hand back an ACTIVE VM. Generous on purpose: this cloud also
 # runs RaaS, which refills its runner pool in batches, and a gate VM queued
 # behind that refill sat in BUILD past a 300s limit. A busy cloud is not a
@@ -160,7 +163,7 @@ fail() {
     echo "=== GATE DIAGNOSTICS (step=\$1) ==="
     kubectl get nodes -o wide 2>&1 | tail -5
     kubectl get pods -A -o wide 2>&1 | tail -20
-    kubectl describe pod gate 2>&1 | tail -30
+    kubectl describe pod \${2:-gate-default} 2>&1 | tail -30
     kubectl get events -A --sort-by=.lastTimestamp 2>&1 | tail -20
     echo "--- CNI ---"
     ls -l /etc/cni/net.d/ 2>&1
@@ -251,37 +254,82 @@ for i in \$(seq 1 60); do
     sleep 5
 done
 
+EOF
+
+# The rest of the test needs nothing from this side, so it is a quoted heredoc
+# and reads as the shell it is, without a backslash in front of every $.
+cat >>"$WORK_DIR/user-data" <<'EOF'
 # --image-pull-policy=Never turns "the control-plane images really were
 # preloaded" into a hard assertion instead of a directory listing.
 #
 # The image to run is read out of the node's own containerd config rather than
 # named here. Hardcoding a pause tag ties the gate to one Kubernetes version -
-# the tag follows the version, so the same literal that passes for 1.37.0 is
-# absent on a 1.34.11 node - and it tests a different image from the one
-# containerd will actually use for sandboxes. Reading it makes the assertion
-# "the sandbox image this node is configured to use is present", for any
-# version.
-PAUSE=\$(awk -F'"' '/^[[:space:]]*sandbox_image[[:space:]]*=/{print \$2; exit}' \
+# the tag follows the version - and it tests a different image from the one
+# containerd will actually use for sandboxes.
+PAUSE=$(awk -F'"' '/^[[:space:]]*sandbox_image[[:space:]]*=/{print $2; exit}' \
          /etc/containerd/config.toml)
-[ -n "\$PAUSE" ] || fail no-sandbox-image
-echo "gate: running the node's own sandbox image \${PAUSE}"
+[ -n "$PAUSE" ] || fail no-sandbox-image
+echo "gate: running the node's own sandbox image ${PAUSE}"
 
-# Retried: admission and the scheduler can both still be warming up.
-for i in \$(seq 1 12); do
-    kubectl run gate --image="\$PAUSE" --image-pull-policy=Never && break
-    [ "\$i" = 12 ] && fail pod-create
-    sleep 5
+# One pod per runtime handler, each to Ready, one at a time.
+#
+# This used to run a single pod under the default handler, and a handler that
+# could not start a sandbox still produced a public image: registration was
+# checked at build time, starting was never checked at all. The runtimes are
+# taken from upstream's newest release on every build, so a release that does
+# not work here - as kata 4.1.0's runtime-rs QEMU does not, nested - has to be
+# caught here or it is caught by a tenant.
+#
+# One at a time because the flavor is small and every kata handler asks for a
+# 2 GB guest; a handler that fails then fails alone, with its own describe.
+run_pod() {
+    h=$1
+    pod=gate-$h
+    rc=
+    if [ "$h" != default ]; then
+        printf 'apiVersion: node.k8s.io/v1\nkind: RuntimeClass\nmetadata: {name: %s}\nhandler: %s\n' \
+            "$h" "$h" | kubectl apply -f - >/dev/null || fail "runtimeclass-$h" "$pod"
+        rc="--overrides={\"spec\":{\"runtimeClassName\":\"$h\"}}"
+    fi
+    # Retried: admission and the scheduler can both still be warming up.
+    for i in $(seq 1 12); do
+        kubectl run "$pod" --image="$PAUSE" --image-pull-policy=Never --restart=Never $rc && break
+        [ "$i" = 12 ] && fail "pod-create-$h" "$pod"
+        sleep 5
+    done
+    kubectl wait --for=condition=Ready "pod/$pod" --timeout=240s || fail "pod-ready-$h" "$pod"
+}
+
+# The default handler first: a pod with no runtimeClassName must run under
+# crun. The node image points containerd's runc handler at /usr/bin/crun, and
+# the shim hands the binary a state root of /run/containerd/runc/k8s.io; crun
+# keeps its own state layout there, so `crun state` answers only for a
+# container crun itself created. A runc-created container is not crun's to see.
+run_pod default
+CID=$(crictl ps --name gate-default -q | head -1)
+[ -n "$CID" ] || fail default-no-container gate-default
+crun --root /run/containerd/runc/k8s.io state "$CID" >/dev/null ||
+    fail default-runtime-not-crun gate-default
+echo "gate: the default handler runs crun"
+kubectl delete pod gate-default --wait=true --timeout=120s >/dev/null
+
+HANDLERS=$(containerd --config /etc/containerd/config.toml config dump 2>/dev/null |
+           sed -n 's|.*containerd\.runtimes\.\([a-z0-9-]*\)\]$|\1|p' | sort -u | grep -vx runc)
+OK=
+for h in $HANDLERS; do
+    echo "gate: starting a pod under handler ${h}"
+    run_pod "$h"
+    OK="${OK:+$OK,}$h"
+    kubectl delete pod "gate-$h" --wait=true --timeout=180s >/dev/null
 done
-kubectl wait --for=condition=Ready pod/gate --timeout=180s || fail pod-ready
 
-KUBELET=\$(kubelet --version | awk '{print \$2}')
-NODE=\$(kubectl get nodes -o jsonpath='{.items[0].status.conditions[?(@.type=="Ready")].status}')
-POD=\$(kubectl get pod gate -o jsonpath='{.status.phase}')
-CTRD=\$(containerd --version | awk '{print \$3}')
+KUBELET=$(kubelet --version | awk '{print $2}')
+NODE=$(kubectl get nodes -o jsonpath='{.items[0].status.conditions[?(@.type=="Ready")].status}')
+CTRD=$(containerd --version | awk '{print $3}')
 
-# One short line, last: the console log is size-capped, so the sentinel has to
+# One line, last: the console log is size-capped, so the sentinel has to
 # survive sitting at the end of a long boot.
-echo "GATE_RESULT status=PASS kubelet=\${KUBELET} node_ready=\${NODE} pod=\${POD} containerd=\${CTRD}"
+echo "GATE_RESULT status=PASS kubelet=${KUBELET} node_ready=${NODE} default=crun handlers=${OK:-none} containerd=${CTRD}"
 EOF
 
 log "creating network ${NAME} (no router: the test needs no egress)"
