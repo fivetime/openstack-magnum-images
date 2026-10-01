@@ -77,7 +77,16 @@ if curl -fsI "${DIB_GVISOR_URL}/gvisor.tar.zstd" >/dev/null; then
     curl -fsSLO "${DIB_GVISOR_URL}/gvisor.tar.zstd"
     curl -fsSLO "${DIB_GVISOR_URL}/gvisor.tar.zstd.sha512"
     sha512sum -c gvisor.tar.zstd.sha512
-    tar --zstd -xf gvisor.tar.zstd runsc containerd-shim-runsc-v1
+    # The whole tarball, not just the two binaries: from these releases runsc
+    # starts the sandbox through sidecar binaries in a gvisor-bin/ directory
+    # beside its own executable, and with the default --sidecar-usage-policy
+    # (STRICT) a runsc without them fails every sandbox:
+    #   sidecar "gvisor_sentry" not usable (stat .../gvisor-bin/gvisor_sentry:
+    #   no such file or directory) and --sidecar-usage-policy is set to STRICT
+    # The image built fine and the per-handler gate caught it.
+    tar --zstd -xf gvisor.tar.zstd
+    [ -x gvisor-bin/gvisor_sentry ] ||
+        { echo "gvisor: the tarball has no gvisor-bin/gvisor_sentry; runsc would refuse to start a sandbox" >&2; exit 1; }
 else
     # Layout up to 20260817.0: each binary on its own.
     for f in runsc containerd-shim-runsc-v1; do
@@ -89,8 +98,20 @@ fi
 [ -s runsc ] && [ -s containerd-shim-runsc-v1 ] ||
     { echo "gvisor: ${DIB_GVISOR_URL} gave no runsc/containerd-shim-runsc-v1; the release layout has changed again" >&2; exit 1; }
 
-install -m 755 runsc /usr/bin/runsc
-install -m 755 containerd-shim-runsc-v1 /usr/bin/containerd-shim-runsc-v1
+# Installed as one tree under /opt/gvisor and linked into /usr/bin. runsc
+# resolves gvisor-bin/ next to its real executable, so a symlink in PATH still
+# finds it, and gvisor-bin/ does not have to be a directory inside /usr/bin.
+# Relative links, so the build's verify step can follow them from outside the
+# chroot.
+rm -rf /opt/gvisor
+install -d -m 755 /opt/gvisor
+install -m 755 runsc containerd-shim-runsc-v1 /opt/gvisor/
+if [ -d gvisor-bin ]; then
+    cp -a gvisor-bin /opt/gvisor/gvisor-bin
+fi
+ln -sfn ../../opt/gvisor/runsc /usr/bin/runsc
+ln -sfn ../../opt/gvisor/containerd-shim-runsc-v1 /usr/bin/containerd-shim-runsc-v1
+/usr/bin/runsc --version
 
 install -d -o root -g root -m 755 /etc/containerd/conf.d
 cat >/etc/containerd/runsc.toml <<EOF

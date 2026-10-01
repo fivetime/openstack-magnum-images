@@ -49,3 +49,12 @@ the same prerequisite Kata has, and so gives up the property above.
 URL 一律 404，每晚构建因此全挂。现在优先下 tarball，校验 sha512 后只解出这两个文件；
 钉老版本（≤ 20260817.0，逐文件格式）时自动走老路径。
 
+**同一批新版本还多了 sidecar。** 从 20260928.0（可能更早的 tarball 版本也是）起，`runsc` 起沙箱要经
+`gvisor-bin/` 里的 `gvisor_sentry` 等辅助程序，目录必须在 `runsc` **真实路径的旁边**；默认
+`--sidecar-usage-policy=STRICT` 找不到就拒绝启动任何沙箱（`sidecar "gvisor_sentry" not usable`）。
+只解出 `runsc` 和 shim 的镜像能构建、能注册 handler，但 gvisor Pod 永远起不来——1.36.5 首次构建时
+被门禁的逐 handler 测试拦下。现在整个 tarball 装在 `/opt/gvisor/`，`/usr/bin/runsc` 与
+`/usr/bin/containerd-shim-runsc-v1` 是指过去的相对符号链接（runsc 按真实路径找 `gvisor-bin/`，
+`hack/verify-image.sh` 在挂载点外跟随相对链接也能检查）。verify 阶段会检查：只要 runsc 认识
+`--sidecar-usage-policy`，就必须有 `gvisor-bin/gvisor_sentry`。
+

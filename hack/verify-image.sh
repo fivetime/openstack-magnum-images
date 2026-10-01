@@ -153,6 +153,17 @@ if [[ -x "$MNT/usr/bin/runsc" ]] &&
    grep -rq "runtimes.gvisor" "$MNT/etc/containerd/conf.d/"; then
     runsc_v=$(bin_version /usr/bin/runsc --version | awk '{print $3}' || true)
     log "gvisor runtime handler present"
+    # A runsc that knows --sidecar-usage-policy starts every sandbox through
+    # gvisor-bin/ beside its real executable, and by default refuses to start
+    # one without it. Caught here it costs a build; missed, it costs the gate's
+    # whole boot - or, before the gate tried each handler, a tenant's pod.
+    if [[ "$native" == true ]] &&
+       "$MNT/usr/bin/runsc" flags 2>&1 | grep -q -- '-sidecar-usage-policy'; then
+        real=$(readlink -f "$MNT/usr/bin/runsc")
+        [[ -x "$(dirname "$real")/gvisor-bin/gvisor_sentry" ]] ||
+            die "runsc ${runsc_v} needs gvisor-bin/ next to $(sed "s|^$MNT||" <<<"$real"), and it is missing"
+        log "gvisor sidecars present: $(ls "$(dirname "$real")/gvisor-bin" | tr '\n' ' ')"
+    fi
 fi
 # kata 4.x ships only the Rust runtime in kata-static, so there is no
 # /opt/kata/bin/kata-runtime to ask any more - looking for it recorded no kata
