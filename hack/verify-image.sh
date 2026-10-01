@@ -179,7 +179,9 @@ if [[ -x "$MNT/opt/kata/runtime-rs/bin/containerd-shim-kata-v2" ]] &&
     # The handler names, not just "kata is here". magnum-cluster-api creates a
     # RuntimeClass per handler and the two lists have to agree; recording what
     # the image actually registered is what makes a disagreement visible.
-    kata_handlers=$(grep -rhoE 'runtimes\.(kata-[a-z0-9-]+)\]' \
+    # The bare "kata" handler (Dragonball) is part of the set, so the pattern
+    # takes the suffix as optional.
+    kata_handlers=$(grep -rhoE 'runtimes\.(kata(-[a-z0-9-]+)?)\]' \
                     "$MNT/etc/containerd/conf.d/" |
                     sed -E 's/^runtimes\.//; s/\]$//' | sort -u | paste -sd, - || true)
     log "kata handlers present: ${kata_handlers:-none} (kata ${kata_v:-unknown})"

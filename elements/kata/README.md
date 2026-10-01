@@ -41,6 +41,7 @@ Rust 运行时。
 
 | handler | shim | 配置 |
 |---|---|---|
+| `kata` | Rust | `configuration-dragonball.toml` —— **不指定 VMM 时的默认**：Dragonball 是 runtime-rs 内建的 VMM，每个 Pod 不多一个 VMM 进程，占用最小 |
 | `kata-qemu` | Go | `configuration-qemu.toml` |
 | `kata-clh` | Go | `configuration-clh.toml` |
 | `kata-qemu-runtime-rs` | Rust | `configuration-qemu-runtime-rs.toml` |
