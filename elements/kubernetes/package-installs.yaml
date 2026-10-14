@@ -15,6 +15,11 @@ linux-firmware:
   when: DISTRO_NAME != debian
 logrotate:
 lvm2:
+# A node is a Nova VM: the agent is what `openstack server set --password`
+# goes through (with hw_qemu_guest_agent=yes on the image). Debian, Ubuntu and
+# the EL rebuilds all start it from a udev rule when the virtio-serial port
+# appears, so there is nothing to enable.
+qemu-guest-agent:
 # NOTE(fitbeard): Use plain systemd-networkd for Debian and Rocky Linux.
 systemd-networkd:
   when: NODE_OS_FAMILY = redhat

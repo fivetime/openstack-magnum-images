@@ -414,6 +414,15 @@ reported=$(grep -o 'kubelet=[^ ]*' <<<"$result" | cut -d= -f2)
 [[ "$reported" == "v${K8S}" ]] ||
     die "kubelet reports ${reported}, image claims v${K8S}"
 
+# The image says Nova can change its password through the guest agent; do it.
+# Nova makes that call synchronously and fails it when the agent does not
+# answer, so a node whose agent is missing or not started fails here.
+if [[ "$(openstack image show "$IMAGE_ID" -f json -c properties | jq -r '.properties.hw_qemu_guest_agent // empty')" == yes ]]; then
+    openstack server set --password "Gate-$(od -An -tx1 -N12 /dev/urandom | tr -d ' \n')" "$NAME" ||
+        die "nova could not change the password through the guest agent"
+    log "password changed through the guest agent"
+fi
+
 # ------------------------------------------------------------- publish it
 log "gate passed; promoting image ${IMAGE_ID}"
 openstack image set --public --property boot_verified=true "$IMAGE_ID"

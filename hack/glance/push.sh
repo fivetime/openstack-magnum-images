@@ -88,6 +88,10 @@ props=(
     --property "hw_firmware_type=uefi"          # block-device-kubernetes lays down an ESP
     --property "k8s_version=${K8S}"
 )
+# The verifier found qemu-ga in the image; Nova attaches the agent's channel
+# only when the image asks for it, and the gate then changes a password
+# through it.
+[[ "$(m qemu_guest_agent)" == true ]] && props+=(--property "hw_qemu_guest_agent=yes")
 # Provenance and capability flags, straight from the manifest. Absent keys are
 # simply not published rather than guessed.
 # kata_handlers is the list of containerd handler names the image registered.

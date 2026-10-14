@@ -73,6 +73,10 @@ done
     die "missing CNI plugins in /opt/cni/bin"
 [[ -f "$MNT/etc/containerd/config.toml" ]] || die "missing /etc/containerd/config.toml"
 [[ -d "$MNT/etc/kubernetes/manifests" ]] || die "missing /etc/kubernetes/manifests"
+# Every VM image carries an SSH server and the guest agent Nova changes the
+# password through; the uploader sets hw_qemu_guest_agent=yes from this.
+[[ -x "$MNT/usr/sbin/sshd" || -x "$MNT/usr/bin/sshd" ]] || die "missing sshd"
+[[ -x "$MNT/usr/bin/qemu-ga" || -x "$MNT/usr/sbin/qemu-ga" ]] || die "missing qemu-ga"
 log "all required binaries present"
 
 # SystemdCgroup is not cosmetic: with the cgroup v2 driver mismatched, kubelet
@@ -233,6 +237,7 @@ jq -n \
     --arg build_run_id "${GITHUB_RUN_ID:-}" \
     --arg source_commit "${GITHUB_SHA:-}" \
     --argjson images_preloaded "$images_preloaded" \
+    --argjson qemu_guest_agent true \
     --argjson boot_verified false \
     '{os_name:$os_name, os_version:$os_version, k8s_version:$k8s_version,
       arch:$arch, kubelet_version:$kubelet_version,
@@ -242,6 +247,7 @@ jq -n \
       kata_handlers:$kata_handlers,
       build_run_id:$build_run_id,
       source_commit:$source_commit, images_preloaded:$images_preloaded,
+      qemu_guest_agent:$qemu_guest_agent,
       boot_verified:$boot_verified}
      | with_entries(select(.value != ""))' >"$OUT"
 
