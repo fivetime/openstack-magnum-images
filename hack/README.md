@@ -43,6 +43,7 @@ endoflife.date 返回的老 minor 扣掉；`K8S_LIST` 显式指定的版本不�
 | `discover.sh` | 运行时算出构建矩阵：维护中的 minor × OS × 架构，扣掉已发布的组合。输出 GitHub matrix JSON。OS 列表在脚本顶部 `OS_LIST`：Debian 13、Ubuntu 22.04/24.04/26.04、Rocky 9/10、AlmaLinux 9/10 |
 | `verify-image.sh` | loop 挂载刚构建的 raw，**从文件系统里读回**二进制是否存在、kubelet 版本是否真等于声称的版本、containerd 是否 `SystemdCgroup = true`，写 manifest |
 | `glance/push.sh` | 按 manifest 打属性传 Glance，`copy-image` 路由进 RBD store 并轮询确认。**传上去是 private** |
+| `glance/retire.sh` | 门禁成功（或 `SKIP_GATE` 跳过）后才删掉 `push.sh` 上传前记在 `old-image-ids.txt` 里的同名旧镜像；还有 CoW 克隆删不掉的改名为 `<名字>-superseded-<时间>`。门禁失败或云跑不了门禁时旧镜像原样保留（2026-10-14 RabbitMQ 故障期间，旧流程在门禁前就删了旧镜像，debian-13-v1.36.5 的公开镜像因此消失，只剩一张没验过的 private 新镜像） |
 | `gate.sh` | 用该镜像在一张无路由的临时网络上开**一台** VM，user-data 里 `kubeadm init`（`imagePullPolicy: Never`）、去污点、等节点 Ready、用节点自己配置的 sandbox 镜像**按每个运行时 handler 各跑一个 Pod**（先跑默认 handler 并用 `crun state` 确认它真的是 crun，再把 containerd 里注册的 gvisor/kata* 逐个跑到 Ready，一次一个，免得小 flavor 同时起几个 2 GB 的 guest），结果经串口 `GATE_RESULT` 回报。运行时每次构建都取上游最新稳定版，所以"新版在这里起不起得来"只能在这里拦住，不能留给租户；核对 kubelet 版本，通过才 `--public` 并发布集群模板；无论成败都拆干净。退出码 0=镜像好、1=镜像坏、2=云跑不了这个测试。**user-data 实际是经计算节点上的 OVN 元数据服务送达的**（虽然请求了 config drive、Nova 也挂了 IDE 光驱，但 UEFI 客户机里看不见它，cloud-init 落到 `DataSourceOpenStackLocal`）——所以某台计算节点元数据命名空间坏了时，VM 会以 `DataSourceNone` 跑完、测试根本没开始；gate 见到这行按退出码 2 处理，不判镜像。2026-09-11 就有五张 1.36.4 镜像这样被误判（全落在被 OVS 劫持的 kvm-worker4 上），本地重跑 gate 全过 |
 
 ## 大文件不过墙
@@ -167,7 +168,8 @@ sudo ./hack/verify-image.sh ubuntu-24.04-v1.37.0-amd64.raw \
 source /etc/openstack/admin-openrc
 IMAGE_STORE=rbd ./hack/glance/push.sh ubuntu-24.04-v1.37.0-amd64.raw \
     ubuntu-24.04-v1.37.0-amd64.manifest.json
-./hack/gate.sh "$(cat image-id.txt)" ubuntu-24.04-v1.37.0-amd64.manifest.json
+./hack/gate.sh "$(cat image-id.txt)" ubuntu-24.04-v1.37.0-amd64.manifest.json \
+  && ./hack/glance/retire.sh "$(cat image-id.txt)" old-image-ids.txt
 ```
 
 `GATE_KEEP=true` 会在门禁结束后把 VM 和临时网络留着供排查。门禁在流水线外也能单独重跑：

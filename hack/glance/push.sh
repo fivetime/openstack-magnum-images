@@ -25,6 +25,8 @@
 #                          cluster came up on the image)
 #   IMAGE_IMPORT_TIMEOUT   seconds to wait for the store copy (default 900)
 #   NAME                   override the generated image name
+#   OLD_IMAGE_IDS_FILE     where to record the images this one supersedes
+#                          (default old-image-ids.txt; see retire.sh)
 
 set -Eeuo pipefail
 
@@ -109,9 +111,14 @@ log "uploading ${NAME}"
 log "  file=${IMAGE_FILE} ($(du -h "$IMAGE_FILE" | cut -f1))"
 log "  store=${IMAGE_STORE:-<default>} visibility=${VISIBILITY}"
 
-# Replace any image of the same name; names are (os, k8s, arch) coordinates,
-# not versions, so a rebuild of the same coordinate supersedes the old one.
-old_id=$(openstack image show "$NAME" -f value -c id 2>/dev/null || true)
+# Names are (os, k8s, arch) coordinates, not versions, so a rebuild of the
+# same coordinate supersedes the images already under the name. They are only
+# recorded here: hack/glance/retire.sh removes them once the gate has passed,
+# so a gate that fails (or a cloud that cannot boot the gate VM) leaves the
+# working image in place. All of them, not `image show`, which refuses a name
+# two images share.
+openstack image list --name "$NAME" -f value -c ID \
+    >"${OLD_IMAGE_IDS_FILE:-old-image-ids.txt}"
 
 if [[ -z "$IMAGE_STORE" ]]; then
     warn "IMAGE_STORE is unset: the image will not be CoW-cloneable on RBD"
@@ -144,26 +151,6 @@ else
         [[ "$store" != "$IMAGE_STORE" ]] && openstack image delete --store "$store" "$image_id"
     done
     openstack image set "--${VISIBILITY}" "$image_id"
-fi
-
-# Only now is the new image safe to keep; retire the one it replaces. Doing it
-# last means a failed upload leaves the working image in place.
-if [[ -n "$old_id" && "$old_id" != "$image_id" ]]; then
-    if openstack image delete "$old_id" >/dev/null 2>&1; then
-        log "  retired previous image ${old_id}"
-    else
-        # A CoW parent with live clones cannot be deleted, and that is expected
-        # - but leaving it under the same name is not. Two images called
-        # ubuntu-24.04-v1.37.0-amd64 make every later `image show <name>`
-        # ambiguous, including the one a cluster template resolves. Rename the
-        # old one so the name keeps pointing at exactly one image.
-        superseded="${NAME}-superseded-$(date +%Y%m%d-%H%M)"
-        if openstack image set --name "$superseded" "$old_id" >/dev/null 2>&1; then
-            warn "  previous image ${old_id} still has clones; renamed to ${superseded}"
-        else
-            warn "  previous image ${old_id} kept AND still named ${NAME}: the name is now ambiguous"
-        fi
-    fi
 fi
 
 openstack image show "$image_id" -c id -c name -c status -c disk_format -c visibility

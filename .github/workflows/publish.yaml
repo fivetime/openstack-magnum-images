@@ -379,6 +379,7 @@ jobs:
           OS_INTERFACE: ${{ vars.OS_INTERFACE || 'public' }}
           IMAGE_STORE: ${{ vars.GLANCE_IMAGE_STORE || 'rbd' }}
           IMAGE_ID_FILE: image-id.txt
+          OLD_IMAGE_IDS_FILE: old-image-ids.txt
 
       # Writes boot_verified back into the manifest, which is what the release
       # job reads: it cannot ask Glance whether a node ever booted.
@@ -402,6 +403,22 @@ jobs:
           SKIP_GATE: ${{ matrix.arch != 'amd64' }}
           GATE_FLAVOR: ${{ vars.GATE_FLAVOR || 'magnum-medium' }}
           GATE_DNS: ${{ vars.GATE_DNS || '192.168.4.254' }}
+
+      # Only after the gate: a rejected image, or a cloud that could not boot
+      # the gate VM, must leave the image already under the name in place.
+      - name: Retire superseded images
+        if: env.GLANCE == 'true'
+        run: ./hack/glance/retire.sh "$(cat image-id.txt)" old-image-ids.txt
+        env:
+          OS_AUTH_URL: ${{ secrets.OS_AUTH_URL }}
+          OS_PROJECT_NAME: ${{ secrets.OS_PROJECT_NAME }}
+          OS_PROJECT_DOMAIN_NAME: ${{ secrets.OS_PROJECT_DOMAIN_NAME }}
+          OS_USERNAME: ${{ secrets.OS_USERNAME }}
+          OS_USER_DOMAIN_NAME: ${{ secrets.OS_USER_DOMAIN_NAME }}
+          OS_PASSWORD: ${{ secrets.OS_PASSWORD }}
+          OS_REGION_NAME: ${{ secrets.OS_REGION_NAME }}
+          OS_IDENTITY_API_VERSION: "3"
+          OS_INTERFACE: ${{ vars.OS_INTERFACE || 'public' }}
 
       # Metadata only - a few hundred bytes, so this crosses to GitHub in a
       # second. The image stays here.
