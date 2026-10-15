@@ -144,6 +144,11 @@ prerelease 也算数。要重新构建一个已有的组合，用 `force=true`�
    该用户要能建 Magnum 集群、传公共镜像、建集群模板。
 3. **仓库变量**（都有默认值）：`GLANCE_IMAGE_STORE`（默认 `rbd`）、
    `GATE_FLAVOR`（默认 `magnum-medium`）、`GATE_DNS`（默认 `192.168.4.254`）。
+   **生产设的是 `GATE_FLAVOR=magnum-gate-kvm`**（2026-10-15）：admin 项目私有，2 核/4G/40G，
+   带 `trait:CUSTOM_NESTED_VIRT=required`（只有 kvm-worker4/5 两台物理机有）。门禁要跑 kata 的 Pod，
+   kata 每个 Pod 是一台轻量虚拟机，需要门禁 VM 里能用 KVM；kvm-worker1–3 本身是虚拟机，落在上面
+   kata 就成了第三层虚拟化，Pod 起不来。2026-10-14 那轮 ubuntu 22.04/24.04/26.04 三张门禁失败的
+   VM 正好分别落在 kvm-worker3/2/1，历史上所有通过的门禁 VM 都在 kvm-worker4/5。
 4. **flavor 必须存在**且带 `trait:CUSTOM_INCUS_SYSTEM_CONTAINER=forbidden`
    ——否则节点可能调度到 incus 计算节点，QCOW2/RAW 镜像在那里会
    `pylxd Image alias not found` 直接 ERROR。
